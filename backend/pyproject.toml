@@ -63,7 +63,9 @@ ignore = ["S101", "ASYNC109"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108", "S311", "PT018", "E501"]
-"alembic/**" = ["N999"]
+"alembic/**" = ["N999", "E501"]
+# Embedded browser JavaScript is kept readable on long lines.
+"src/app/infrastructure/browser/form_filler.py" = ["E501"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.Cookie",

@@ -21,8 +21,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from app.domain.discovery.models import AiPolicy, OpportunityExtract
+from app.domain.discovery.models import AiPolicy, OpportunityExtract, dedupe_key
+from app.domain.discovery.playbook import ExtractionStrategy
 from app.domain.eligibility.rules import EligibilityRules, RuleResult, RuleSource, RuleStatus
+from app.domain.ports.discovery import ExtractionResult
 from app.domain.ports.llm import ChatMessage, ILLMProvider
 from app.domain.shared.enums import OpportunityType
 from app.domain.shared.errors import DomainError
@@ -34,11 +36,60 @@ MAX_OPPORTUNITIES_PER_PAGE = 10
 class ExtractionError(DomainError):
     code = "extraction_failed"
 
+    def __init__(self, message: str, diagnostics: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
 
 def untrusted_block(tag: str, content: str, **attrs: str) -> str:
     safe = re.sub(rf"</?\s*{tag}\b[^>]*>", "[removed tag]", content, flags=re.I)
     attr_text = "".join(f' {k}="{v.replace(chr(34), "")}"' for k, v in attrs.items())
     return f"<{tag}{attr_text}>\n{safe}\n</{tag}>"
+
+
+def recover_partial_list(text: str, key: str) -> list[dict[str, Any]]:
+    """Salvage every COMPLETE object from a truncated `{"key": [ {...}, {...}, {...` reply
+    (what a model returns when it runs out of output tokens mid-answer)."""
+    anchor = text.find(f'"{key}"')
+    start = text.find("[", anchor if anchor >= 0 else 0)
+    if start < 0:
+        return []
+    decoder = json.JSONDecoder()
+    items: list[dict[str, Any]] = []
+    pos = start + 1
+    while True:
+        nxt = text.find("{", pos)
+        if nxt < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, nxt)
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, dict):
+            items.append(obj)
+        pos = end
+    return items
+
+
+def split_windows(text: str, chunk_chars: int, overlap: int, max_windows: int = 8) -> list[str]:
+    """Paragraph-aligned windows of ~chunk_chars with a little overlap for context."""
+    if len(text) <= chunk_chars:
+        return [text]
+    paragraphs = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+    windows: list[str] = []
+    current = ""
+    for para in paragraphs:
+        while len(para) > chunk_chars:  # a single enormous paragraph
+            windows.append(para[:chunk_chars])
+            para = para[chunk_chars - overlap :]
+        if current and len(current) + len(para) + 2 > chunk_chars:
+            windows.append(current)
+            current = current[-overlap:] + "\n\n" + para if overlap else para
+        else:
+            current = f"{current}\n\n{para}" if current else para
+    if current.strip():
+        windows.append(current)
+    return windows[:max_windows]
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -202,16 +253,69 @@ forbids AI-written essays. Return {"opportunities": []} if there are none."""
 
 
 class LlmOpportunityExtractor:
+    """Long pages are extracted in windows; truncated replies are partially recovered; every
+    attempt is described in `diagnostics` for the campaign flight recorder."""
+
     async def extract(
-        self, llm: ILLMProvider, markdown: str, source_url: str
-    ) -> list[OpportunityExtract]:
+        self,
+        llm: ILLMProvider,
+        markdown: str,
+        source_url: str,
+        strategy: ExtractionStrategy | None = None,
+    ) -> ExtractionResult:
+        strategy = strategy or ExtractionStrategy()
         system = EXTRACT_SYSTEM.replace("{today}", datetime.now(UTC).date().isoformat())
-        doc = untrusted_block(
-            "untrusted_document", markdown[:MAX_DOC_CHARS], source=source_url[:300]
+        windows = split_windows(markdown, strategy.chunk_chars, strategy.overlap_chars)
+        diagnostics: dict[str, Any] = {
+            "model": llm.model,
+            "input_chars": len(markdown),
+            "chunked": len(windows) > 1,
+            "chunks": len(windows),
+            "chunk_chars": strategy.chunk_chars,
+            "max_tokens": strategy.max_tokens,
+            "attempts": [],
+        }
+        merged: dict[str, OpportunityExtract] = {}
+        failures = 0
+        for index, window in enumerate(windows):
+            label = f"part {index + 1}/{len(windows)}" if len(windows) > 1 else "page"
+            doc = untrusted_block(
+                "untrusted_document", window[:MAX_DOC_CHARS], source=source_url[:300], section=label
+            )
+            messages = [ChatMessage("system", system), ChatMessage("user", doc)]
+            attempt: dict[str, Any] = {"window": index + 1, "chars": len(window)}
+            try:
+                reply = await _json_reply(
+                    llm,
+                    messages,
+                    ExtractionReply,
+                    max_tokens=strategy.max_tokens,
+                    recover_key="opportunities",
+                    attempt=attempt,
+                )
+            except ExtractionError as exc:
+                failures += 1
+                attempt["error"] = exc.message
+                diagnostics["attempts"].append(attempt)
+                continue
+            diagnostics["attempts"].append(attempt)
+            for model in reply.opportunities[:MAX_OPPORTUNITIES_PER_PAGE]:
+                extract = to_extract(model)
+                merged.setdefault(
+                    dedupe_key(extract.title, extract.organization, extract.deadline), extract
+                )
+        diagnostics["failed_windows"] = failures
+        diagnostics["opportunities"] = len(merged)
+        if failures == len(windows):
+            last = diagnostics["attempts"][-1] if diagnostics["attempts"] else {}
+            raise ExtractionError(
+                f"no valid JSON from the model (finish_reason={last.get('finish_reason')})",
+                diagnostics,
+            )
+        return ExtractionResult(
+            extracts=list(merged.values())[: MAX_OPPORTUNITIES_PER_PAGE * 2],
+            diagnostics=diagnostics,
         )
-        messages = [ChatMessage("system", system), ChatMessage("user", doc)]
-        reply = await _json_reply(llm, messages, ExtractionReply, max_tokens=3000)
-        return [to_extract(m) for m in reply.opportunities[:MAX_OPPORTUNITIES_PER_PAGE]]
 
 
 # ---- fuzzy eligibility --------------------------------------------------------------------------
@@ -257,22 +361,64 @@ class LlmFuzzyEligibilityEvaluator:
 
 
 async def _json_reply[T: BaseModel](
-    llm: ILLMProvider, messages: list[ChatMessage], schema: type[T], *, max_tokens: int
+    llm: ILLMProvider,
+    messages: list[ChatMessage],
+    schema: type[T],
+    *,
+    max_tokens: int,
+    recover_key: str | None = None,
+    attempt: dict[str, Any] | None = None,
 ) -> T:
+    attempt = attempt if attempt is not None else {}
     reply = await llm.complete(messages, max_tokens=max_tokens, temperature=0.0)
+    attempt |= {
+        "finish_reason": reply.finish_reason,
+        "reply_chars": len(reply.text),
+        "completion_tokens": reply.completion_tokens,
+    }
+    parsed = _validate(schema, reply.text, recover_key, attempt)
+    if parsed is not None:
+        return parsed
+    retry = [
+        *messages,
+        ChatMessage("assistant", reply.text[:4000]),
+        ChatMessage(
+            "user",
+            "That was not valid or was cut off. Reply with ONLY the JSON object, matching the "
+            "schema exactly. Keep summaries short.",
+        ),
+    ]
+    second = await llm.complete(retry, max_tokens=max_tokens, temperature=0.0)
+    attempt |= {
+        "retried": True,
+        "retry_finish_reason": second.finish_reason,
+        "retry_reply_chars": len(second.text),
+    }
+    parsed = _validate(schema, second.text, recover_key, attempt)
+    if parsed is not None:
+        return parsed
+    reason = second.finish_reason or reply.finish_reason
+    hint = " (output truncated: finish_reason=length)" if reason == "length" else ""
+    raise ExtractionError(f"the model did not return valid JSON{hint}", dict(attempt))
+
+
+def _validate[T: BaseModel](
+    schema: type[T], text: str, recover_key: str | None, attempt: dict[str, Any]
+) -> T | None:
     try:
-        return schema.model_validate(parse_json_object(reply.text))
+        return schema.model_validate(parse_json_object(text))
     except (ValueError, ValidationError):
-        retry = [
-            *messages,
-            ChatMessage("assistant", reply.text[:4000]),
-            ChatMessage(
-                "user",
-                "That was not valid. Reply with ONLY the JSON object, matching the schema exactly.",
-            ),
-        ]
-        second = await llm.complete(retry, max_tokens=max_tokens, temperature=0.0)
-        try:
-            return schema.model_validate(parse_json_object(second.text))
-        except (ValueError, ValidationError) as exc:
-            raise ExtractionError("the model did not return valid JSON") from exc
+        pass
+    if recover_key:
+        items = recover_partial_list(text, recover_key)
+        valid = []
+        for item in items:
+            try:
+                valid.append(schema.model_validate({recover_key: [item]}))
+            except ValidationError:
+                continue
+        if valid:
+            attempt["recovered_partial"] = len(valid)
+            combined = [o for v in valid for o in getattr(v, recover_key)]
+            return schema.model_validate({recover_key: [o.model_dump() for o in combined]})
+    return None

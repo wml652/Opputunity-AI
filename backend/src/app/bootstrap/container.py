@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from collections.abc import Coroutine
+from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.api.container import ApiConfig, ApiContainer, DiscoveryUseCases, VaultUseCases
+from app.api.container import (
+    ApiConfig,
+    ApiContainer,
+    ApplicationUseCases,
+    DiscoveryUseCases,
+    NotificationUseCases,
+    VaultUseCases,
+)
+from app.application.applications.use_cases import (
+    AnswerQuestion,
+    ApplicationDeps,
+    GetApplicationDetail,
+    GetCheckpointScreenshot,
+    GetInbox,
+    RunApplication,
+    StartFilling,
+)
 from app.application.auth.use_cases import (
     AuthDeps,
     EnsureDevUser,
@@ -24,11 +43,20 @@ from app.application.discovery.use_cases import (
     DiscoveryDeps,
     GetCampaign,
     GetOpportunity,
+    GetPage,
     GetPipelineSummary,
     ListApplicationQueue,
     ListCampaigns,
     ListOpportunities,
+    RetryPage,
     RunCampaign,
+    SweepInterruptedCampaigns,
+)
+from app.application.essay.synthesis import (
+    EditEssayDraft,
+    EssayDeps,
+    ListEssayDrafts,
+    SynthesizeEssay,
 )
 from app.application.essay.use_cases import (
     CreateEssay,
@@ -59,6 +87,17 @@ from app.application.memory.use_cases import (
     RecallMemory,
     UpdateMemory,
 )
+from app.application.notifications.use_cases import (
+    DeleteChannel,
+    ListChannels,
+    NotificationDeps,
+    NotifyUser,
+    RecentNotifications,
+    RecordDeliveryReceipt,
+    SaveChannel,
+    SendTestNotification,
+    VerifyChannel,
+)
 from app.application.profile.use_cases import (
     DeleteDocument,
     DownloadDocument,
@@ -70,14 +109,18 @@ from app.application.profile.use_cases import (
 )
 from app.application.system.use_cases import GetWorkerStatus
 from app.application.vault_deps import VaultDeps
+from app.domain.ports.applications import IApplicationRunner, INotifier
 from app.domain.ports.discovery import ICampaignRunner
 from app.domain.shared.clock import Clock, SystemClock
+from app.domain.shared.enums import NotifChannel
+from app.infrastructure.browser.form_filler import PlaywrightFormFiller
 from app.infrastructure.config.settings import Settings
 from app.infrastructure.crypto.aes_gcm_cipher import AesGcmCipher
 from app.infrastructure.crypto.key_ring import KeyRing
 from app.infrastructure.db.session import create_engine, create_sessionmaker
 from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory, SystemUnitOfWorkFactory
 from app.infrastructure.documents.pdf import PypdfTextExtractor
+from app.infrastructure.events.campaign_log import FileCampaignLog
 from app.infrastructure.events.redis_bus import RedisEventBus, RedisWorkerRegistry
 from app.infrastructure.extraction.llm_adapters import (
     LlmFuzzyEligibilityEvaluator,
@@ -86,6 +129,14 @@ from app.infrastructure.extraction.llm_adapters import (
 from app.infrastructure.linkedin.public_adapter import LinkedInPublicAdapter
 from app.infrastructure.llm.embeddings import EmbeddingProviderFactory
 from app.infrastructure.llm.openai_compatible import OpenAICompatibleProviderFactory
+from app.infrastructure.notify.notifiers import (
+    DevLogNotifier,
+    MetaWhatsAppNotifier,
+    ResendNotifier,
+    SmtpNotifier,
+    TwilioWhatsAppNotifier,
+)
+from app.infrastructure.runners.application_runner import InProcessApplicationRunner
 from app.infrastructure.runners.campaign_runners import InProcessCampaignRunner
 from app.infrastructure.scraping.distiller import HtmlContentProcessor
 from app.infrastructure.scraping.fetchers import playwright_available
@@ -116,11 +167,20 @@ class Infrastructure:
     crawl_guard: SsrfGuard
     clock: Clock
     campaign_runner: ICampaignRunner | None = None
+    application_runner: IApplicationRunner | None = None
+    background: set[asyncio.Task[None]] = field(default_factory=set)
+
+    def spawn(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Fire-and-forget background work owned by the process (page retries)."""
+        task = asyncio.create_task(coro)
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
 
     async def aclose(self) -> None:
-        closer = getattr(self.campaign_runner, "aclose", None)
-        if closer is not None:
-            await closer()
+        for runner in (self.campaign_runner, self.application_runner):
+            closer = getattr(runner, "aclose", None)
+            if closer is not None:
+                await closer()
         await self.llm_factory.aclose()
         await self.redis.aclose()
         await self.engine.dispose()
@@ -257,6 +317,7 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
         fuzzy=LlmFuzzyEligibilityEvaluator(),
         chat=ResolveChatProvider(llm),
         embeddings=GetEmbeddingProvider(llm),
+        campaign_log=FileCampaignLog(s.logs_dir),
     )
 
 
@@ -291,7 +352,137 @@ def build_discovery(infra: Infrastructure) -> DiscoveryUseCases:
         queue=ListApplicationQueue(infra.uow_factory),
         summary=GetPipelineSummary(infra.uow_factory),
         runner=build_campaign_runner(infra),
+        retry_page=RetryPage(deps),
+        get_page=GetPage(infra.uow_factory),
+        log_path=deps.campaign_log.path_for,
+        spawn=infra.spawn,
     )
+
+
+def build_notifiers(infra: Infrastructure) -> dict[NotifChannel, INotifier]:
+    s = infra.settings
+    http = infra.llm_factory.http_client
+    notifiers: dict[NotifChannel, INotifier] = {}
+    if s.resend_api_key and s.resend_sender:
+        notifiers[NotifChannel.EMAIL] = ResendNotifier(
+            s.resend_api_key.get_secret_value(), s.resend_sender, http
+        )
+    elif s.smtp_host:
+        notifiers[NotifChannel.EMAIL] = SmtpNotifier(
+            host=s.smtp_host,
+            port=s.smtp_port,
+            username=s.smtp_username,
+            password=s.smtp_password.get_secret_value() if s.smtp_password else None,
+            sender=s.smtp_sender,
+            starttls=s.smtp_starttls,
+        )
+    if s.twilio_account_sid and s.twilio_auth_token and s.twilio_whatsapp_from:
+        notifiers[NotifChannel.WHATSAPP] = TwilioWhatsAppNotifier(
+            s.twilio_account_sid,
+            s.twilio_auth_token.get_secret_value(),
+            s.twilio_whatsapp_from,
+            http,
+            status_callback=f"{s.public_api_url.rstrip('/')}/api/v1/webhooks/twilio",
+        )
+    elif s.meta_wa_access_token and s.meta_wa_phone_number_id:
+        notifiers[NotifChannel.WHATSAPP] = MetaWhatsAppNotifier(
+            s.meta_wa_access_token.get_secret_value(),
+            s.meta_wa_phone_number_id,
+            s.meta_wa_template,
+            http,
+        )
+    if s.notifications_dev_log and not s.is_production:
+        for channel in NotifChannel:
+            notifiers.setdefault(channel, DevLogNotifier(channel, s.logs_dir))
+    return notifiers
+
+
+def build_notification_deps(infra: Infrastructure) -> NotificationDeps:
+    return NotificationDeps(
+        uow_factory=infra.uow_factory,
+        cipher=infra.cipher,
+        clock=infra.clock,
+        notifiers=build_notifiers(infra),
+        console_url=infra.settings.console_url,
+    )
+
+
+def build_essay_engine(infra: Infrastructure) -> SynthesizeEssay:
+    llm = llm_deps(infra)
+    return SynthesizeEssay(
+        EssayDeps(
+            uow_factory=infra.uow_factory,
+            clock=infra.clock,
+            chat=ResolveChatProvider(llm),
+            embeddings=GetEmbeddingProvider(llm),
+            stylometry=StylometryAnalyzer(),
+        )
+    )
+
+
+def build_application_deps(infra: Infrastructure) -> ApplicationDeps:
+    vault = build_vault(infra)
+    return ApplicationDeps(
+        uow_factory=infra.uow_factory,
+        cipher=infra.cipher,
+        clock=infra.clock,
+        storage=infra.storage,
+        filler=PlaywrightFormFiller(infra.crawl_guard),
+        get_profile=vault.get_profile,
+        download=vault.download_document,
+        recall=vault.recall,
+        learn=vault.learn_answer,
+        update_memory=vault.update_memory,
+        essays=build_essay_engine(infra),
+        notify=NotifyUser(build_notification_deps(infra)),
+    )
+
+
+def build_application_runner(infra: Infrastructure) -> IApplicationRunner:
+    if infra.application_runner is None:
+        infra.application_runner = InProcessApplicationRunner(
+            RunApplication(build_application_deps(infra))
+        )
+    return infra.application_runner
+
+
+def build_applications(infra: Infrastructure) -> ApplicationUseCases:
+    deps = build_application_deps(infra)
+    runner = build_application_runner(infra)
+    engine = deps.essays
+    return ApplicationUseCases(
+        detail=GetApplicationDetail(infra.uow_factory, infra.cipher),
+        start=StartFilling(infra.uow_factory, infra.clock, runner),
+        inbox=GetInbox(infra.uow_factory),
+        answer=AnswerQuestion(deps, runner),
+        screenshot=GetCheckpointScreenshot(infra.uow_factory, infra.cipher, infra.storage),
+        synthesize=engine,
+        edit_draft=EditEssayDraft(engine.deps),
+        list_drafts=ListEssayDrafts(infra.uow_factory),
+    )
+
+
+def build_notifications(infra: Infrastructure) -> NotificationUseCases:
+    s = infra.settings
+    deps = build_notification_deps(infra)
+    return NotificationUseCases(
+        save_channel=SaveChannel(deps),
+        verify_channel=VerifyChannel(deps),
+        list_channels=ListChannels(infra.uow_factory),
+        delete_channel=DeleteChannel(infra.uow_factory),
+        send_test=SendTestNotification(deps),
+        recent=RecentNotifications(infra.uow_factory),
+        receipt=RecordDeliveryReceipt(infra.system_uow_factory),
+        twilio_auth_token=s.twilio_auth_token.get_secret_value() if s.twilio_auth_token else None,
+        meta_app_secret=s.meta_app_secret.get_secret_value() if s.meta_app_secret else None,
+        meta_verify_token=s.meta_verify_token.get_secret_value() if s.meta_verify_token else None,
+        public_api_url=s.public_api_url,
+        providers={c.value: n.name for c, n in deps.notifiers.items()},
+    )
+
+
+def build_sweep(infra: Infrastructure) -> SweepInterruptedCampaigns:
+    return SweepInterruptedCampaigns(infra.system_uow_factory, infra.clock)
 
 
 def build_api_container(infra: Infrastructure) -> ApiContainer:
@@ -345,4 +536,6 @@ def build_api_container(infra: Infrastructure) -> ApiContainer:
         worker_status=GetWorkerStatus(infra.worker_registry),
         vault=build_vault(infra),
         discovery=build_discovery(infra),
+        applications=build_applications(infra),
+        notifications=build_notifications(infra),
     )

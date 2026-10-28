@@ -54,6 +54,9 @@ COUNTER_KEYS = (
     "expired",
     "uncertain",
     "queued",
+    "pages_skipped",
+    "pages_retried",
+    "adapted",
 )
 
 
@@ -162,6 +165,8 @@ class FetchedPage:
     blocked: bool = False  # SSRF guard refused the URL (or a redirect hop)
     error: str | None = None
     blocked_requests: int = 0  # subresources/redirects the browser was prevented from loading
+    trace: list[dict[str, Any]] = field(default_factory=list)  # flight-recorder steps
+    strategy: dict[str, Any] = field(default_factory=dict)  # FetchStrategy actually used
 
 
 @dataclass(slots=True)
@@ -180,6 +185,13 @@ class CrawledPage:
     injection_flags: list[dict[str, str]]
     error: str | None
     fetched_at: datetime
+    trace: list[dict[str, Any]] = field(default_factory=list)
+    error_stage: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+    discovery_source: str | None = None  # seed | followed_link | web_search | linkedin | retry
+    discovery_query: str | None = None
+    strategy: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

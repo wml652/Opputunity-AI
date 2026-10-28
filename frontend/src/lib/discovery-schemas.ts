@@ -33,6 +33,10 @@ export const crawledPageSchema = z.object({
   error: z.string().nullable(),
   markdown_chars: z.number(),
   fetched_at: z.string(),
+  error_stage: z.string().nullable().optional(),
+  error_code: z.string().nullable().optional(),
+  discovery_source: z.string().nullable().optional(),
+  discovery_query: z.string().nullable().optional(),
 });
 export type CrawledPageT = z.infer<typeof crawledPageSchema>;
 

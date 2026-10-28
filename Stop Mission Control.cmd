@@ -1,5 +1,5 @@
 @echo off
-title Stop Mission Control
+title Stop OPPORTUNITIES ON THE GO
 cd /d "%~dp0"
 set "PY=backend\.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"

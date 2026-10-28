@@ -4,11 +4,21 @@ import uuid
 from types import TracebackType
 from typing import Protocol, Self
 
+from app.domain.ports.applications import (
+    IApplicationDetailRepository,
+    IChannelRepository,
+    ICheckpointRepository,
+    IEssayDraftRepository,
+    IFieldRepository,
+    INotificationRepository,
+    IQuestionRepository,
+)
 from app.domain.ports.discovery import (
     IApplicationRepository,
     ICampaignRepository,
     ICrawledPageRepository,
     IOpportunityRepository,
+    IPlaybookRepository,
     IVerdictRepository,
 )
 from app.domain.ports.repositories import (
@@ -78,6 +88,30 @@ class IUnitOfWork(Protocol):
 
     @property
     def applications(self) -> IApplicationRepository: ...
+
+    @property
+    def playbooks(self) -> IPlaybookRepository: ...
+
+    @property
+    def app_details(self) -> IApplicationDetailRepository: ...
+
+    @property
+    def fields(self) -> IFieldRepository: ...
+
+    @property
+    def questions(self) -> IQuestionRepository: ...
+
+    @property
+    def checkpoints(self) -> ICheckpointRepository: ...
+
+    @property
+    def essay_drafts(self) -> IEssayDraftRepository: ...
+
+    @property
+    def channels(self) -> IChannelRepository: ...
+
+    @property
+    def notifications(self) -> INotificationRepository: ...
 
     async def __aenter__(self) -> Self: ...
 

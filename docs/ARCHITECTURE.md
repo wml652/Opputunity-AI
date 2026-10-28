@@ -585,3 +585,71 @@ and streamed over SSE.
   `Location` before fulfilling.
 - **IP-literal hosts.** The SSRF guard now judges IP-literal hosts directly instead of trusting
   DNS.
+
+### Part 1: Flight recorder and cross-campaign self-healing (complete)
+
+**Trace:**
+- Every page stores `crawled_pages.trace`, with the stages DISCOVERY, MEMORY, PREFLIGHT_AND_SSRF,
+  BROWSER_FETCH/HTTP_FETCH, DISTILL_AND_SANITIZE and LLM_EXTRACTION.
+- Each page also stores `error_stage`, `error_code` and `error_detail`, plus its
+  `discovery_source` and `discovery_query`.
+- `FileCampaignLog` mirrors everything (redacted) to `.logs/campaigns/campaign_<id>.jsonl` and a
+  human-readable `.log`.
+- The Campaigns page opens a **Crawl Inspector** drawer per page. It shows the timeline, HTTP
+  status, failure stage, Markdown preview, and a "Retry Page with Adaptive Strategy" button.
+
+**Self-healing:** each `domain_playbooks` row (RLS per user and domain) remembers what failed.
+- **Fetch:** 403s, empty renders and timeouts escalate `FetchStrategy`: longer hydration, a
+  `load` / `networkidle` wait, and a browser/HTTP switch.
+- **Extraction:** truncated or invalid JSON escalates `ExtractionStrategy`. Pages over 6000 chars
+  are split into overlapping windows, `max_tokens` goes up to 8192, and partial JSON is recovered.
+- **Dead URLs:** 404, 410 and login walls are skipped on later campaigns with "Skipped based on
+  Campaign #X failure memory".
+- **Interrupted campaigns:** a RUNNING campaign left behind by a stopped API is marked FAILED at
+  startup.
+
+**Egress proxy:** Chromium traffic goes through an in-process SSRF proxy, so sites see a real
+browser TLS fingerprint (`route.fetch` caused 403s).
+- Plain-HTTP forwarding is one request per connection (`Connection: close`).
+- Otherwise a kept-alive connection would carry the browser's next request to the pinned
+  upstream without validation. This was found by the fake-portal E2E test.
+
+### M4: Essay synthesis, form filler, Action Inbox, notifications (complete)
+
+**Essays:**
+- Retrieval uses top-k `essay_chunks`, profile facts and the fingerprint.
+- Drafts are generated on the user's model under a style spec.
+- A critic pass handles banned clichés and unsupported claims, with one revision.
+- Each draft gets a **Voice Match** score (feature cosine) and a **Burstiness** score
+  `1 - |CV_d - CV_s| / CV_s`.
+- When `ai_policy=PROHIBITED`, the draft is flagged `requires_manual`.
+
+**Filler** (`infrastructure/browser/form_filler.py`):
+- Runs Playwright behind the egress proxy.
+- Fields resolve in order: profile synonyms → documents (decrypted to a temp dir) → essay
+  detector → semantic memory.
+- A field is filled only at confidence ≥ 0.85, and the filler **never clicks Submit**.
+- Below that threshold, the step is checkpointed (encrypted `storage_state`, DOM fingerprint,
+  fill ledger, screenshot). A `pending_questions` row is created, the application moves to
+  `PAUSED_NEEDS_USER_INPUT`, and the user is notified.
+- Answering in the Inbox stores the field, learns the answer into `knowledge_memory_qa`, and moves
+  the application to `RESUME_QUEUED`.
+- On resume, the checkpoint is restored if its fingerprint matches. Otherwise the ledger is
+  replayed from step 1 (for example after the portal dropped the draft).
+
+**Notifications:**
+- `INotifier` adapters: SMTP, Resend, Twilio WhatsApp, Meta WhatsApp, and a dev-log fallback.
+- Channels are verified with a 6-digit code (stored as a sha256 hash, 15-minute TTL).
+- Messages are deduplicated on `template + application_id + state`.
+- Webhooks at `/api/v1/webhooks/twilio` and `/api/v1/webhooks/meta` are signature-verified.
+
+**UI:**
+- `/inbox`: Questions, Ready for OK, Needs a human, plus a live sidebar badge.
+- `/applications/[id]`: timeline, fields with source tags, drafts with scores, checkpoint
+  screenshots.
+- `/vault/essays` gains a synthesizer.
+- `/settings/notifications`.
+
+**Gate:** `tests/integration/test_application_filler.py` runs against the 3-step
+`tests/fixtures/fake_portal`. It covers pause → Inbox answer → memory → resume with ledger replay
+after a wipe → stop before Submit → a second portal auto-answered from memory.

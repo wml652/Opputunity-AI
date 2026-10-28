@@ -35,6 +35,7 @@ class CrawlStatus(enum.StrEnum):
     EXTRACTED = "EXTRACTED"
     BLOCKED_SSRF = "BLOCKED_SSRF"
     FAILED = "FAILED"
+    SKIPPED = "SKIPPED"  # not fetched: a past campaign proved the URL dead (failure memory)
 
 
 class OpportunityType(enum.StrEnum):

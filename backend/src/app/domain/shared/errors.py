@@ -35,5 +35,12 @@ class UnsafeUrlError(ValidationError):
     code = "unsafe_url"
 
 
+class DnsResolutionError(UnsafeUrlError):
+    """The host did not resolve (yet). Still refused (fail closed), but this is a transient
+    network condition, not an SSRF violation, and is classified/retried as such."""
+
+    code = "dns_error"
+
+
 class DecryptionError(DomainError):
     code = "decryption_failed"

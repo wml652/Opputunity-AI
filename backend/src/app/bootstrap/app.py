@@ -11,6 +11,7 @@ from app.bootstrap.container import (
     build_api_container,
     build_infrastructure,
     build_relay,
+    build_sweep,
 )
 from app.infrastructure.config.settings import Settings, get_settings
 from app.infrastructure.events.outbox_relay import OutboxRelayLoop
@@ -20,7 +21,9 @@ from app.infrastructure.runtime.event_loop import configure_event_loop
 log = get_logger(__name__)
 
 
-def create_app_with(infra: Infrastructure, *, run_relay: bool | None = None) -> FastAPI:
+def create_app_with(
+    infra: Infrastructure, *, run_relay: bool | None = None, run_sweep: bool = True
+) -> FastAPI:
     settings = infra.settings
     relay_enabled = settings.outbox_relay_in_api if run_relay is None else run_relay
 
@@ -34,6 +37,10 @@ def create_app_with(infra: Infrastructure, *, run_relay: bool | None = None) -> 
                 poll_interval=settings.outbox_poll_interval_seconds,
             )
             relay_loop.start()
+        if settings.campaign_runner == "inprocess" and run_sweep:
+            interrupted = await build_sweep(infra).execute()
+            if interrupted:
+                log.warning("campaigns.interrupted_marked_failed", count=interrupted)
         log.info("api.started", environment=settings.environment, outbox_relay=relay_enabled)
         if settings.dev_auth_bypass:
             log.warning("api.dev_auth_bypass_enabled", detail="login is disabled (DEV ONLY)")

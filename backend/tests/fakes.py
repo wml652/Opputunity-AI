@@ -65,10 +65,22 @@ def _fuzzy_reply(user: str) -> str:
     return json.dumps({"results": results})
 
 
+ESSAY_TEXT = (
+    "I grew up repairing radios with my father. It taught me patience. When our neighbourhood lost "
+    "power for a week, I built a small solar charger from spare parts, and it worked badly at first "
+    "but it worked. That stubborn loop of trying, failing, and trying again is why research appeals "
+    "to me. In this program I want to study how small devices can make energy cheaper. I am not the "
+    "loudest student in the room. I am usually the one still testing at midnight."
+)
+
+TRUNCATE_ABOVE_CHARS = 6_500  # windows larger than this simulate finish_reason=length
+
+
 @dataclass
 class FakeLLM:
     model: str
     calls: list[list[ChatMessage]] = field(default_factory=list)
+    finish_reasons: list[str | None] = field(default_factory=list)
 
     async def complete(
         self, messages: Sequence[ChatMessage], *, max_tokens: int = 1024, temperature: float = 0.2
@@ -76,13 +88,38 @@ class FakeLLM:
         self.calls.append(list(messages))
         system = messages[0].content
         user = messages[-1].content
+        finish: str | None = "stop"
         if "extract structured opportunity" in system:
-            text = _extraction_reply(user)
+            document = messages[1].content
+            if len(document) > TRUNCATE_ABOVE_CHARS:
+                # A reasoning model ran out of output tokens mid-answer.
+                text, finish = '{"opportunities": [{"title": "Cut off mid', "length"
+            else:
+                text = _extraction_reply(user if len(messages) == 2 else document)
         elif "check a student's eligibility" in system:
             text = _fuzzy_reply(user)
+        elif "IN THE VOICE OF ONE SPECIFIC STUDENT" in system:
+            # First draft slips in two banned cliches; the revision request removes them.
+            text = (
+                ESSAY_TEXT
+                if user.startswith("Revise the essay")
+                else (
+                    "I want to delve into research; it is a testament to my curiosity. "
+                    + ESSAY_TEXT
+                )
+            )
+        elif "List claims in <essay>" in system:
+            text = '{"unsupported_claims": []}'
         else:
             text = "ok"
-        return Completion(text=text, model=self.model, prompt_tokens=10, completion_tokens=10)
+        self.finish_reasons.append(finish)
+        return Completion(
+            text=text,
+            model=self.model,
+            prompt_tokens=10,
+            completion_tokens=10,
+            finish_reason=finish,
+        )
 
     async def list_models(self) -> list[str]:
         return [self.model]

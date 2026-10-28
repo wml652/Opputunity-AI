@@ -38,6 +38,7 @@ from app.bootstrap.app import create_app_with  # noqa: E402
 from app.bootstrap.container import Infrastructure, build_infrastructure  # noqa: E402
 from app.infrastructure.config.settings import Settings  # noqa: E402
 from tests.fixtures import ControlledEmbeddingFactory  # noqa: E402
+from tests.fixtures.fake_portal.app import FakePortalServer  # noqa: E402
 from tests.portal import Portal  # noqa: E402
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -135,11 +136,19 @@ def portal() -> Iterator[Portal]:
     server.stop()
 
 
+@pytest.fixture(scope="session")
+def fake_portal() -> Iterator[FakePortalServer]:
+    server = FakePortalServer().start()
+    yield server
+    server.stop()
+
+
 @pytest.fixture
-def settings(tmp_path: Path, portal: Portal) -> Settings:
+def settings(tmp_path: Path, portal: Portal, fake_portal: FakePortalServer) -> Settings:
     return Settings(
         storage_dir=str(tmp_path / "storage"),
-        scraper_test_fixture_hosts=[portal.host],
+        logs_dir=str(tmp_path / "logs"),
+        scraper_test_fixture_hosts=[portal.host, fake_portal.host],
         crawl_use_playwright=False,
         crawl_politeness_seconds=0.0,
         _env_file=None,  # type: ignore[call-arg]  # tests never read the developer's .env

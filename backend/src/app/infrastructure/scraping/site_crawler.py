@@ -16,9 +16,11 @@ import re
 import time
 import urllib.robotparser
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from urllib.parse import urlsplit, urlunsplit
 
 from app.domain.discovery.models import CampaignSettings, FetchedPage, registrable_host
+from app.domain.discovery.playbook import FetchStrategy, Stage, StepStatus
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.distiller import extract_links
 from app.infrastructure.scraping.fetchers import PageFetcher, PlaywrightFetcher, SafeHttpFetcher
@@ -125,24 +127,46 @@ class SiteCrawler:
         parser = self._robots[origin]
         return parser is None or parser.can_fetch("*", url)
 
-    async def fetch(self, url: str) -> FetchedPage:
+    async def fetch(self, url: str, strategy: FetchStrategy | None = None) -> FetchedPage:
         await self._polite(url)
-        return await self._page_fetcher.fetch(url)
+        return await self._page_fetcher.fetch(url, strategy)
 
     async def crawl(
-        self, seed_url: str, keywords: Sequence[str], settings: CampaignSettings
+        self,
+        seed_url: str,
+        keywords: Sequence[str],
+        settings: CampaignSettings,
+        strategy: FetchStrategy | None = None,
     ) -> AsyncIterator[FetchedPage]:
         seed = _normalize(seed_url)
         frontier: list[tuple[int, int, int, str]] = [(0, 0, 0, seed)]  # (-score, depth, order, url)
+        origin: dict[str, tuple[str, str]] = {}  # url -> (parent url, anchor text)
         seen = {seed}
         order = 0
         fetched = 0
         while frontier and fetched < settings.max_pages_per_site:
-            _, depth, _, url = heapq.heappop(frontier)
-            if not await self._allowed(url):
+            neg_score, depth, _, url = heapq.heappop(frontier)
+            parent, anchor = origin.get(url, ("", ""))
+            # robots.txt governs links we FOLLOW; the seed is the user's explicit choice.
+            if depth > 0 and not await self._allowed(url):
                 log.info("crawler.robots_disallowed", url=url)
                 continue
-            page = await self.fetch(url)
+            page = await self.fetch(url, strategy)
+            discovery = {
+                "stage": Stage.DISCOVERY.value,
+                "status": StepStatus.OK.value,
+                "started_at": "",
+                "duration_ms": 0,
+                "detail": {
+                    "source": "seed" if depth == 0 else "followed_link",
+                    "seed": seed,
+                    "depth": depth,
+                    "parent": parent or None,
+                    "anchor": anchor or None,
+                    "link_score": -neg_score,
+                },
+            }
+            page = replace(page, trace=[discovery, *page.trace])
             fetched += 1
             yield page
             if page.blocked or page.error or not page.html or depth >= settings.max_depth:
@@ -157,6 +181,7 @@ class SiteCrawler:
                 if score <= 0:
                     continue
                 seen.add(norm)
+                origin[norm] = (page.final_url, anchor)
                 order += 1
                 heapq.heappush(frontier, (-score, depth + 1, order, norm))
 

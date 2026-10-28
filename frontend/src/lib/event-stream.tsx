@@ -19,7 +19,14 @@ const DISCOVERY_EVENTS = new Set([
   "opportunity.found",
   "eligibility.verdict",
   "application.queued",
+  "application.state",
+  "page.skipped",
+  "page.adapted",
+  "page.retrying",
+  "page.retried",
 ]);
+// Filler, inbox, essay and memory events refresh the application/inbox caches.
+const APPLICATION_EVENTS = new Set(["application.state", "essay.draft_created", "memory.learned"]);
 
 export type StreamState = "connecting" | "live" | "reconnecting";
 
@@ -76,6 +83,10 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
         void qc.invalidateQueries({ queryKey: keys.providers });
       }
       if (DISCOVERY_EVENTS.has(event.type)) scheduleDiscoveryRefresh();
+      if (APPLICATION_EVENTS.has(event.type)) {
+        void qc.invalidateQueries({ queryKey: ["m4"] });
+        void qc.invalidateQueries({ queryKey: keys.inbox });
+      }
     };
 
     const open = () => {

@@ -4,11 +4,13 @@ import Link from "next/link";
 
 import { CampaignLauncher } from "@/components/discovery/campaign-launcher";
 import { DeadlineCell } from "@/components/discovery/outcome";
+import { Button } from "@/components/ui/button";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill } from "@/components/ui/status";
 import { cn, formatTime } from "@/lib/cn";
 import { usePipelineSummary, useQueue } from "@/lib/discovery-queries";
 import { useEventStream } from "@/lib/event-stream";
+import { useStartFilling } from "@/lib/m4-queries";
 import { llmStatusPayloadSchema, type PipelineEvent } from "@/lib/schemas";
 
 const COUNTERS = [
@@ -66,6 +68,36 @@ function describe(event: PipelineEvent): { summary: string; tone?: "ok" | "err" 
       };
     case "application.queued":
       return { summary: `Queued: ${String(p.title)}`, tone: "ok" };
+    case "application.state": {
+      const st = String(p.state);
+      return {
+        summary: `${st}: ${String(p.title)}${p.reason ? ` · ${String(p.reason)}` : ""}`,
+        tone:
+          st === "PAUSED_NEEDS_USER_INPUT" || st === "AWAITING_FINAL_VERIFICATION"
+            ? "warn"
+            : st === "BLOCKED_NEEDS_HUMAN" || st === "FAILED"
+              ? "err"
+              : st === "SUBMITTED"
+                ? "ok"
+                : undefined,
+      };
+    }
+    case "essay.draft_created":
+      return {
+        summary: `Essay draft · voice ${Math.round(Number(p.voice_match) * 100)}% · burstiness ${Math.round(Number(p.burstiness) * 100)}%${p.requires_manual ? " · manual authoring required" : ""}`,
+        tone: p.requires_manual ? "warn" : "ok",
+      };
+    case "page.skipped":
+      return { summary: `Skipped ${String(p.url)}${p.message ? ` · ${String(p.message)}` : ""}` };
+    case "page.adapted":
+      return { summary: `Adapted ${String(p.domain)}: ${String(p.message)}`, tone: "warn" };
+    case "page.retrying":
+      return { summary: `Retrying ${String(p.url)} (${String(p.reason)}) with an escalated strategy`, tone: "warn" };
+    case "page.retried":
+      return {
+        summary: `Retried ${String(p.url)} -> ${String(p.status)}${p.error_code ? ` (${String(p.error_code)})` : ""}`,
+        tone: p.status === "EXTRACTED" ? "ok" : p.status === "FAILED" ? "err" : undefined,
+      };
     case "vault.profile_updated":
       return { summary: "Student profile saved (PII encrypted)", tone: "ok" };
     case "vault.document_added":
@@ -196,6 +228,7 @@ export function PipelineOverview() {
 
 function QueuePanel() {
   const { data: queue } = useQueue();
+  const start = useStartFilling();
   return (
     <Panel title="Application queue" meta="deadline ASC" className="col-span-2">
       <table className="w-full table-fixed border-collapse">
@@ -204,20 +237,35 @@ function QueuePanel() {
             <th className={cn(th, "w-10")}>#</th>
             <th className={th}>Opportunity</th>
             <th className={cn(th, "w-24")}>Deadline</th>
+            <th className={cn(th, "w-16")} />
           </tr>
         </thead>
         <tbody>
           {!queue?.length ? (
-            <EmptyRow colSpan={3}>Eligible opportunities are queued here automatically.</EmptyRow>
+            <EmptyRow colSpan={4}>Eligible opportunities are queued here automatically.</EmptyRow>
           ) : (
             queue.map((q) => (
               <tr key={q.application_id} className="hover:bg-surface-2">
                 <td className={cn(td, "font-mono text-2xs text-faint tabular")}>{q.priority_rank ?? "—"}</td>
                 <td className={cn(td, "py-1")}>
-                  <div className="truncate text-xs">{q.opportunity.title}</div>
+                  <Link href={`/applications/${q.application_id}`} className="block truncate text-xs hover:underline">
+                    {q.opportunity.title}
+                  </Link>
                   <div className="font-mono text-[10px] text-faint">{q.state}</div>
                 </td>
                 <td className={td}><DeadlineCell iso={q.deadline_at} /></td>
+                <td className={cn(td, "text-right")}>
+                  {q.state === "QUEUED" ? (
+                    <Button
+                      size="sm"
+                      onClick={() => start.mutate(q.application_id)}
+                      disabled={start.isPending || !q.opportunity.portal_url}
+                      title={q.opportunity.portal_url ? "Fill the portal (stops before Submit)" : "No portal URL"}
+                    >
+                      Fill
+                    </Button>
+                  ) : null}
+                </td>
               </tr>
             ))
           )}

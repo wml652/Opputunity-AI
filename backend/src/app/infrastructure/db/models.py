@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Identity,
     Index,
@@ -38,7 +39,11 @@ from app.domain.shared.enums import (
     CrawlStatus,
     DocKind,
     EligibilityOutcome,
+    EssayStatus,
+    NotifChannel,
+    NotifStatus,
     OpportunityType,
+    QuestionStatus,
     Scope,
     SourceType,
 )
@@ -381,6 +386,13 @@ class CrawledPageRow(Base):
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = _ts(default_now=True)
+    trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    error_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    discovery_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    discovery_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    strategy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
 
 
 # `opportunities.embedding` is vector(1024), written/searched via explicit SQL like memory.
@@ -476,6 +488,166 @@ class ApplicationTransitionRow(Base):
     at: Mapped[datetime] = _ts(default_now=True)
 
 
+class DomainPlaybookRow(Base):
+    __tablename__ = "domain_playbooks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    fetch_strategy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    extraction_strategy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    failures: Mapped[dict[str, int]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    dead_urls: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    successes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    updated_at: Mapped[datetime] = _ts(default_now=True)
+
+
+class ApplicationCheckpointRow(Base):
+    __tablename__ = "application_checkpoints"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    dom_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_state_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    storage_state_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    storage_state_key_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    fill_ledger: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    screenshot_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    screenshot_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    screenshot_key_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    created_at: Mapped[datetime] = _ts(default_now=True)
+
+
+class ApplicationFieldRow(Base):
+    __tablename__ = "application_fields"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False
+    )
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    field_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    field_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    options: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    value_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    value_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    value_key_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    value_source: Mapped[str] = mapped_column(String(12), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    memory_qa_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    essay_draft_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    user_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    updated_at: Mapped[datetime] = _ts(default_now=True)
+
+    __table_args__ = (
+        UniqueConstraint("application_id", "field_key", name="uq_application_fields_key"),
+    )
+
+
+class PendingQuestionRow(Base):
+    __tablename__ = "pending_questions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False
+    )
+    field_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    field_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    options: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    suggested_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    status: Mapped[QuestionStatus] = mapped_column(_pg_enum(QuestionStatus, "question_status"))
+    answered_qa_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = _ts(default_now=True)
+    answered_at: Mapped[datetime | None] = _ts(nullable=True)
+
+
+class EssayDraftRow(Base):
+    __tablename__ = "essay_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    application_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=True
+    )
+    opportunity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("opportunities.id", ondelete="SET NULL"), nullable=True
+    )
+    field_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    word_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    critique: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    voice_match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    burstiness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[EssayStatus] = mapped_column(_pg_enum(EssayStatus, "essay_status"))
+    requires_manual: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    fingerprint_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = _ts(default_now=True)
+    updated_at: Mapped[datetime] = _ts(default_now=True)
+
+
+class NotificationChannelRow(Base):
+    __tablename__ = "notification_channels"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    channel: Mapped[NotifChannel] = mapped_column(_pg_enum(NotifChannel, "notif_channel"))
+    address_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    address_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    address_key_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    address_hint: Mapped[str] = mapped_column(String(80), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    verified_at: Mapped[datetime | None] = _ts(nullable=True)
+    verify_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    verify_expires_at: Mapped[datetime | None] = _ts(nullable=True)
+    created_at: Mapped[datetime] = _ts(default_now=True)
+
+
+class NotificationRow(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    channel: Mapped[NotifChannel] = mapped_column(_pg_enum(NotifChannel, "notif_channel"))
+    template: Mapped[str] = mapped_column(String(30), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    status: Mapped[NotifStatus] = mapped_column(_pg_enum(NotifStatus, "notif_status"))
+    provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    provider_message_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    related_application_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = _ts(default_now=True)
+    updated_at: Mapped[datetime] = _ts(default_now=True)
+
+
 TENANT_TABLES = (
     "refresh_tokens",
     "llm_provider_configs",
@@ -495,4 +667,12 @@ TENANT_TABLES = (
     "eligibility_verdicts",
     "applications",
     "application_transitions",
+    "domain_playbooks",
+    "application_checkpoints",
+    "application_fields",
+    "pending_questions",
+    "essay_drafts",
+    "notification_channels",
+    "notifications",
+    "browser_sessions",
 )

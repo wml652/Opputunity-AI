@@ -20,6 +20,7 @@ from app.domain.discovery.models import (
     Opportunity,
     empty_counters,
 )
+from app.domain.discovery.playbook import DomainPlaybook, ExtractionStrategy, FetchStrategy
 from app.domain.eligibility.rules import EligibilityRules, RuleResult, RuleSource, RuleStatus
 from app.domain.ports.discovery import OpportunityFilter, Verdict
 from app.domain.shared.enums import (
@@ -35,6 +36,7 @@ from app.infrastructure.db.models import (
     CampaignRow,
     CampaignSourceRow,
     CrawledPageRow,
+    DomainPlaybookRow,
     EligibilityVerdictRow,
     OpportunityRow,
 )
@@ -168,6 +170,19 @@ class SqlCampaignRepository:
             stmt = stmt.where(CampaignRow.status != CampaignStatus.CANCELLED)
         await self._s.execute(stmt.values(**values))
 
+    async def fail_running(self, error: str, at: datetime) -> int:
+        result = await self._s.execute(
+            update(CampaignRow)
+            .where(CampaignRow.status.in_([CampaignStatus.RUNNING, CampaignStatus.DRAFT]))
+            .values(
+                status=CampaignStatus.FAILED,
+                phase=CampaignPhase.FAILED.value,
+                error=error,
+                finished_at=at,
+            )
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]
+
     async def status_of(self, user_id: uuid.UUID, campaign_id: uuid.UUID) -> CampaignStatus | None:
         return await self._s.scalar(
             select(CampaignRow.status).where(
@@ -195,6 +210,13 @@ def _page(r: CrawledPageRow) -> CrawledPage:
         injection_flags=list(r.injection_flags or []),
         error=r.error,
         fetched_at=r.fetched_at,
+        trace=list(r.trace or []),
+        error_stage=r.error_stage,
+        error_code=r.error_code,
+        error_detail=r.error_detail,
+        discovery_source=r.discovery_source,
+        discovery_query=r.discovery_query,
+        strategy=dict(r.strategy or {}),
     )
 
 
@@ -220,6 +242,13 @@ class SqlCrawledPageRepository:
                 injection_flags=page.injection_flags,
                 error=page.error,
                 fetched_at=page.fetched_at,
+                trace=page.trace,
+                error_stage=page.error_stage,
+                error_code=page.error_code,
+                error_detail=page.error_detail,
+                discovery_source=page.discovery_source,
+                discovery_query=page.discovery_query,
+                strategy=page.strategy,
             )
             .on_conflict_do_nothing(constraint="uq_crawled_pages_campaign_sha")
             .returning(CrawledPageRow.id)
@@ -236,6 +265,47 @@ class SqlCrawledPageRepository:
             query = query.where(CrawledPageRow.status.in_(list(statuses)))
         rows = await self._s.scalars(query.order_by(CrawledPageRow.fetched_at))
         return [_page(r) for r in rows]
+
+    async def get(self, user_id: uuid.UUID, page_id: uuid.UUID) -> CrawledPage | None:
+        row = await self._s.scalar(
+            select(CrawledPageRow).where(
+                CrawledPageRow.user_id == user_id, CrawledPageRow.id == page_id
+            )
+        )
+        return _page(row) if row else None
+
+    async def update_diagnostics(self, page: CrawledPage) -> None:
+        values: dict[str, Any] = {
+            "status": page.status,
+            "trace": page.trace,
+            "error": page.error,
+            "error_stage": page.error_stage,
+            "error_code": page.error_code,
+            "error_detail": page.error_detail,
+            "strategy": page.strategy,
+            "http_status": page.http_status,
+            "final_url": page.final_url,
+            "title": page.title,
+            "markdown": page.markdown,
+            "injection_flags": page.injection_flags,
+        }
+        # Keep the content hash unique per campaign: only take the new hash if it is free.
+        clash = None
+        if page.content_sha256:
+            clash = await self._s.scalar(
+                select(CrawledPageRow.id).where(
+                    CrawledPageRow.campaign_id == page.campaign_id,
+                    CrawledPageRow.content_sha256 == page.content_sha256,
+                    CrawledPageRow.id != page.id,
+                )
+            )
+        if clash is None:
+            values["content_sha256"] = page.content_sha256
+        await self._s.execute(
+            update(CrawledPageRow)
+            .where(CrawledPageRow.user_id == page.user_id, CrawledPageRow.id == page.id)
+            .values(**values)
+        )
 
     async def set_status(
         self, user_id: uuid.UUID, page_id: uuid.UUID, status: CrawlStatus, error: str | None = None
@@ -554,3 +624,48 @@ class SqlApplicationRepository:
             )
         ).all()
         return {state: int(n) for state, n in rows}
+
+
+# ---- domain playbooks (cross-campaign failure memory) -------------------------------------------
+
+
+class SqlPlaybookRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def all_for_user(self, user_id: uuid.UUID) -> dict[str, DomainPlaybook]:
+        rows = await self._s.scalars(
+            select(DomainPlaybookRow).where(DomainPlaybookRow.user_id == user_id)
+        )
+        return {
+            r.domain: DomainPlaybook(
+                id=r.id,
+                user_id=r.user_id,
+                domain=r.domain,
+                fetch=FetchStrategy.from_dict(dict(r.fetch_strategy)),
+                extraction=ExtractionStrategy.from_dict(dict(r.extraction_strategy)),
+                failures=dict(r.failures),
+                dead_urls=dict(r.dead_urls),
+                successes=r.successes,
+                last_campaign_id=r.last_campaign_id,
+                updated_at=r.updated_at,
+            )
+            for r in rows
+        }
+
+    async def save(self, playbook: DomainPlaybook) -> None:
+        values = {
+            "fetch_strategy": playbook.fetch.to_dict(),
+            "extraction_strategy": playbook.extraction.to_dict(),
+            "failures": playbook.failures,
+            "dead_urls": playbook.dead_urls,
+            "successes": playbook.successes,
+            "last_campaign_id": playbook.last_campaign_id,
+            "updated_at": playbook.updated_at,
+        }
+        stmt = pg_insert(DomainPlaybookRow).values(
+            id=playbook.id, user_id=playbook.user_id, domain=playbook.domain, **values
+        )
+        await self._s.execute(
+            stmt.on_conflict_do_update(constraint="uq_domain_playbooks_user_domain", set_=values)
+        )

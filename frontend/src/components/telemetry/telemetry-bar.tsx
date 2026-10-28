@@ -40,7 +40,7 @@ export function TelemetryBar() {
 
   return (
     <header className="flex h-10 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
-      <span className="font-mono text-xs font-semibold tracking-tight text-fg">OPPORTUNITY/CTL</span>
+      <span className="font-mono text-xs font-semibold tracking-tight text-fg">OPPORTUNITIES ON THE GO</span>
       <Divider />
       <ProviderSelect />
       <ConnectionBadge />

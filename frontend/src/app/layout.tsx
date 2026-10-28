@@ -9,7 +9,7 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "sw
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "Opportunity Control",
+  title: "OPPORTUNITIES ON THE GO",
   description: "Opportunity discovery and human-in-the-loop application console",
   robots: { index: false, follow: false },
 };

@@ -83,7 +83,58 @@ def _layout(title: str, body: str) -> str:
     )
 
 
+FLAKY_SEEN: set[str] = set()
+
+
+def long_page() -> str:
+    """A 14,000+ character blog post with one real opportunity buried in the middle."""
+    filler = "".join(
+        f"<p>Section {i}: Planning ahead matters for every student. Deadlines differ by country and "
+        "programme, so build a calendar, gather documents early, and ask referees in advance. "
+        "This paragraph is general advice and does not describe any specific opportunity.</p>"
+        for i in range(40)
+    )
+    middle = "".join(
+        f"<p>{k}: {v}</p>"
+        for k, v in {
+            "Title": "Omega Long-Read Fellowship",
+            "Organization": "Omega Society",
+            "Type": "SCHOLARSHIP",
+            "Deadline": "2099-03-03",
+            "Degree": "BACHELOR",
+            "Apply": "/apply/omega",
+        }.items()
+    )
+    return _layout("Scholarship deadlines calendar", f"<article>{filler}{middle}{filler}</article>")
+
+
 def render(path: str, query: str) -> tuple[int, dict[str, str], str]:
+    if path == "/long-blog":
+        return 200, {"content-type": "text/html"}, long_page()
+    if path.startswith("/blocked-once/"):
+        token = path.rsplit("/", 1)[-1]
+        if token not in FLAKY_SEEN:
+            FLAKY_SEEN.add(token)
+            return 403, {"content-type": "text/html"}, "<h1>Access denied</h1>"
+        fields = {
+            "Title": f"Kappa Retry Grant {token}",
+            "Organization": "Kappa Org",
+            "Type": "SCHOLARSHIP",
+            "Deadline": "2099-07-07",
+            "Degree": "BACHELOR",
+            "Apply": "/apply/kappa",
+        }
+        body = "".join(f"<p>{k}: {v}</p>" for k, v in fields.items()) + (
+            "<p>This grant supports undergraduate students across many disciplines worldwide.</p>"
+            * 3
+        )
+        return (
+            200,
+            {"content-type": "text/html"},
+            _layout(fields["Title"], f"<article>{body}</article>"),
+        )
+    if path == "/gone":
+        return 404, {"content-type": "text/html"}, "<h1>Not found</h1>"
     if path == "/robots.txt":
         return 200, {"content-type": "text/plain"}, "User-agent: *\nDisallow: /private/\n"
     if path == "/":

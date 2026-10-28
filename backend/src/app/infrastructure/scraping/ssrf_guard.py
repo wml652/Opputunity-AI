@@ -78,6 +78,25 @@ class SsrfGuard:
         # fixture portals served by pytest; settings refuse this outside ENVIRONMENT=test.
         self._fixtures = frozenset(h.lower() for h in test_fixture_hosts)
 
+    async def resolve_pinned(self, host: str, port: int) -> list[str]:
+        """Public IPs to connect to for an ALREADY validated host (re-checked here, so a DNS
+        answer that changed since `validate` still cannot reach a private address)."""
+        host = host.strip("[]").rstrip(".").lower()
+        if self._fixtures and f"{host}:{port}" in self._fixtures:
+            return [host]
+        literal = _ip_literal(host)
+        if literal is not None:
+            addresses = [literal]
+        else:
+            try:
+                addresses = await self._resolve(host, port)
+            except OSError as exc:
+                raise DnsResolutionError("host does not resolve") from exc
+        public = [a for a in addresses if self._allow_private or is_public_ip(a)]
+        if not public or len(public) != len(addresses):
+            raise UnsafeUrlError("host resolves to a non-public address")
+        return public
+
     async def validate(self, url: str) -> str:
         try:
             parts = urlsplit(url.strip())
@@ -119,9 +138,9 @@ class SsrfGuard:
             try:
                 addresses = addresses or await self._resolve(host, port)
             except OSError as exc:
-                raise UnsafeUrlError("host does not resolve") from exc
+                raise DnsResolutionError("host does not resolve") from exc
             if not addresses:
-                raise UnsafeUrlError("host does not resolve")
+                raise DnsResolutionError("host does not resolve")
             bad = [a for a in addresses if not is_public_ip(a)]
             if bad:
                 raise UnsafeUrlError("URL resolves to a non-public address")

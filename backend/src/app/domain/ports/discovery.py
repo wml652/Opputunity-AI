@@ -18,6 +18,7 @@ from app.domain.discovery.models import (
     Opportunity,
     OpportunityExtract,
 )
+from app.domain.discovery.playbook import DomainPlaybook, ExtractionStrategy, FetchStrategy
 from app.domain.eligibility.rules import RuleResult
 from app.domain.ports.llm import ILLMProvider
 from app.domain.shared.enums import (
@@ -32,12 +33,16 @@ from app.domain.shared.enums import (
 
 class ISiteCrawler(Protocol):
     def crawl(
-        self, seed_url: str, keywords: Sequence[str], settings: CampaignSettings
+        self,
+        seed_url: str,
+        keywords: Sequence[str],
+        settings: CampaignSettings,
+        strategy: FetchStrategy | None = None,
     ) -> AsyncIterator[FetchedPage]:
-        """Breadth-first crawl of one site (same registrable domain), politely rate-limited."""
+        """Best-first crawl of one site (same registrable domain), politely rate-limited."""
         ...
 
-    async def fetch(self, url: str) -> FetchedPage: ...
+    async def fetch(self, url: str, strategy: FetchStrategy | None = None) -> FetchedPage: ...
 
     async def aclose(self) -> None: ...
 
@@ -92,10 +97,36 @@ class IListingSource(Protocol):
 # ---- reasoning ----------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class ExtractionResult:
+    extracts: list[OpportunityExtract]
+    diagnostics: dict[str, Any]
+
+
 class IOpportunityExtractor(Protocol):
     async def extract(
-        self, llm: ILLMProvider, markdown: str, source_url: str
-    ) -> list[OpportunityExtract]: ...
+        self,
+        llm: ILLMProvider,
+        markdown: str,
+        source_url: str,
+        strategy: ExtractionStrategy | None = None,
+    ) -> ExtractionResult:
+        """Raises an error carrying `diagnostics` when no window could be extracted."""
+        ...
+
+
+class ICampaignLog(Protocol):
+    """Flight recorder on disk: `campaign_{id}.jsonl` (machine) + `campaign_{id}.log` (human)."""
+
+    def write(self, campaign_id: uuid.UUID, record: dict[str, Any]) -> None: ...
+
+    def path_for(self, campaign_id: uuid.UUID) -> str: ...
+
+
+class IPlaybookRepository(Protocol):
+    async def all_for_user(self, user_id: uuid.UUID) -> dict[str, DomainPlaybook]: ...
+
+    async def save(self, playbook: DomainPlaybook) -> None: ...
 
 
 class IFuzzyEligibilityEvaluator(Protocol):
@@ -135,6 +166,10 @@ class ICampaignRepository(Protocol):
         self, user_id: uuid.UUID, campaign_id: uuid.UUID
     ) -> CampaignStatus | None: ...
 
+    async def fail_running(self, error: str, at: datetime) -> int:
+        """System scope: mark every RUNNING/DRAFT campaign as FAILED (interrupted)."""
+        ...
+
 
 class ICrawledPageRepository(Protocol):
     async def add(self, page: CrawledPage) -> bool:
@@ -148,6 +183,12 @@ class ICrawledPageRepository(Protocol):
     async def set_status(
         self, user_id: uuid.UUID, page_id: uuid.UUID, status: CrawlStatus, error: str | None = None
     ) -> None: ...
+
+    async def get(self, user_id: uuid.UUID, page_id: uuid.UUID) -> CrawledPage | None: ...
+
+    async def update_diagnostics(self, page: CrawledPage) -> None:
+        """Persist status, trace, error_* and strategy after extraction or a retry."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

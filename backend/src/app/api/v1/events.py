@@ -127,6 +127,11 @@ async def list_events(
 
 
 @router.get("/inbox/summary", response_model=InboxSummaryOut)
-async def inbox_summary(_user: CurrentUserId) -> InboxSummaryOut:
-    # Escalated questions and final-verification items arrive in Milestone 4/5.
-    return InboxSummaryOut(open_questions=0, awaiting_verification=0, total=0)
+async def inbox_summary(user_id: CurrentUserId, container: Container) -> InboxSummaryOut:
+    data = await container.applications.inbox.execute(user_id)
+    questions, awaiting = len(data.questions), len(data.awaiting_verification)
+    return InboxSummaryOut(
+        open_questions=questions,
+        awaiting_verification=awaiting,
+        total=questions + awaiting + len(data.blocked),
+    )

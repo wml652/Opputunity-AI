@@ -1,4 +1,4 @@
-"""Opportunity Mission Control: one-click launcher and process supervisor (stdlib only).
+"""OPPORTUNITIES ON THE GO: one-click launcher and process supervisor (stdlib only).
 
     python scripts/launcher.py            start everything (idempotent) and open the browser
     python scripts/launcher.py --stop     stop the API and frontend
@@ -314,7 +314,7 @@ def open_browser() -> None:
 def start() -> None:
     env = build_env()
     if api_up() and console_up():
-        say("Mission Control is already running")
+        say("OPPORTUNITIES ON THE GO is already running")
         open_browser()
         return
     bootstrap(env)
@@ -351,11 +351,14 @@ def install_shortcuts() -> None:
     target = ROOT / "Launch Mission Control.cmd"
     desktop = desktop_dir()
     for folder in (desktop, ROOT):
-        link = folder / "Opportunity Mission Control.lnk"
-        create_shortcut(link, target, icon, "Start Opportunity Mission Control")
+        legacy = folder / "Opportunity Mission Control.lnk"  # pre-rebrand shortcut name
+        if legacy.exists():
+            legacy.unlink()
+        link = folder / "Opportunities On The Go.lnk"
+        create_shortcut(link, target, icon, "Start OPPORTUNITIES ON THE GO")
         say(f"shortcut: {link}")
     stop_link = ROOT / "Stop Mission Control.lnk"
-    create_shortcut(stop_link, ROOT / "Stop Mission Control.cmd", icon, "Stop Mission Control")
+    create_shortcut(stop_link, ROOT / "Stop Mission Control.cmd", icon, "Stop OPPORTUNITIES ON THE GO")
 
 
 def desktop_dir() -> Path:
@@ -393,7 +396,7 @@ def create_shortcut(link: Path, target: Path, icon: Path, description: str) -> N
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Opportunity Mission Control launcher")
+    parser = argparse.ArgumentParser(description="OPPORTUNITIES ON THE GO launcher")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--stop", action="store_true")
     group.add_argument("--status", action="store_true")

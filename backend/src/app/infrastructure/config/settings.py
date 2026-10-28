@@ -53,6 +53,32 @@ class Settings(BaseSettings):
     # Local fixture portals ("127.0.0.1:PORT") that bypass the SSRF guard. TEST MODE ONLY.
     scraper_test_fixture_hosts: list[str] = Field(default_factory=list)
 
+    # Campaign flight-recorder logs (<logs_dir>/campaigns/campaign_<id>.jsonl|.log)
+    logs_dir: str = "../.logs"
+    # Public URL of the console, used in notification links
+    console_url: str = "http://localhost:3000"
+
+    # Notifications (all optional). Without a provider, channels fall back to the dev log
+    # notifier (writes <logs_dir>/notifications.log, NOT delivered) unless disabled.
+    notifications_dev_log: bool = True
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_sender: str = "OPPORTUNITIES ON THE GO <noreply@localhost>"
+    smtp_starttls: bool = True
+    resend_api_key: SecretStr | None = None
+    resend_sender: str | None = None
+    twilio_account_sid: str | None = None
+    twilio_auth_token: SecretStr | None = None
+    twilio_whatsapp_from: str | None = None
+    meta_wa_access_token: SecretStr | None = None
+    meta_wa_phone_number_id: str | None = None
+    meta_wa_template: str = "opportunity_update"
+    meta_app_secret: SecretStr | None = None
+    meta_verify_token: SecretStr | None = None
+    public_api_url: str = "http://127.0.0.1:8000"  # used to verify Twilio webhook signatures
+
     # Encrypted document blobs (local disk in dev; swap the adapter for S3 in the cloud)
     storage_dir: str = ".storage"
 

@@ -96,6 +96,11 @@ class PageOut(BaseModel):
     markdown_chars: int
     fetched_at: datetime
 
+    error_stage: str | None = None
+    error_code: str | None = None
+    discovery_source: str | None = None
+    discovery_query: str | None = None
+
     @staticmethod
     def of(p: CrawledPage) -> PageOut:
         return PageOut(
@@ -109,6 +114,29 @@ class PageOut(BaseModel):
             error=p.error,
             markdown_chars=len(p.markdown or ""),
             fetched_at=p.fetched_at,
+            error_stage=p.error_stage,
+            error_code=p.error_code,
+            discovery_source=p.discovery_source,
+            discovery_query=p.discovery_query,
+        )
+
+
+class PageDetailOut(PageOut):
+    trace: list[dict[str, Any]]
+    error_detail: str | None
+    strategy: dict[str, Any]
+    markdown_preview: str
+    log_file: str | None = None
+
+    @staticmethod
+    def of_page(p: CrawledPage, log_file: str | None = None) -> PageDetailOut:
+        return PageDetailOut(
+            **PageOut.of(p).model_dump(),
+            trace=p.trace,
+            error_detail=p.error_detail,
+            strategy=p.strategy,
+            markdown_preview=(p.markdown or "")[:8000],
+            log_file=log_file,
         )
 
 
@@ -278,6 +306,23 @@ async def cancel_campaign(
 ) -> Response:
     await container.discovery.cancel_campaign.execute(user_id, campaign_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/campaigns/{campaign_id}/pages/{page_id}", response_model=PageDetailOut)
+async def page_detail(
+    campaign_id: uuid.UUID, page_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> PageDetailOut:
+    page = await container.discovery.get_page.execute(user_id, campaign_id, page_id)
+    return PageDetailOut.of_page(page, container.discovery.log_path(campaign_id))
+
+
+@router.post("/campaigns/{campaign_id}/pages/{page_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_page(
+    campaign_id: uuid.UUID, page_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> dict[str, str]:
+    await container.discovery.get_page.execute(user_id, campaign_id, page_id)  # 404 early
+    container.discovery.spawn(container.discovery.retry_page.execute(user_id, campaign_id, page_id))
+    return {"status": "retrying"}
 
 
 @router.get("/opportunities", response_model=list[OpportunityOut])

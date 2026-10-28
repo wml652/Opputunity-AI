@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import uuid
 from collections.abc import Sequence
 from decimal import Decimal
@@ -299,6 +300,26 @@ class SqlEssayRepository:
                     "m": embedding_model,
                 },
             )
+
+    async def nearest_chunks(
+        self, user_id: uuid.UUID, vector: Sequence[float], embedding_model: str, k: int
+    ) -> builtins.list[tuple[str, float]]:
+        rows = (
+            await self._s.execute(
+                text(
+                    """
+                    WITH mine AS MATERIALIZED (
+                        SELECT text, embedding FROM essay_chunks
+                        WHERE user_id = :u AND embedding_model = :m
+                    )
+                    SELECT text, 1 - (embedding <=> CAST(CAST(:v AS text) AS vector)) AS sim
+                    FROM mine ORDER BY embedding <=> CAST(CAST(:v AS text) AS vector) LIMIT :k
+                    """
+                ),
+                {"u": user_id, "m": embedding_model, "v": vector_literal(vector), "k": k},
+            )
+        ).all()
+        return [(r.text, float(r.sim)) for r in rows]
 
     async def chunk_count(self, user_id: uuid.UUID) -> int:
         count = await self._s.scalar(

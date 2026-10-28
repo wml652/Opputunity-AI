@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from typing import Any
 
+from app.application.applications.use_cases import (
+    AnswerQuestion,
+    GetApplicationDetail,
+    GetCheckpointScreenshot,
+    GetInbox,
+    StartFilling,
+)
 from app.application.auth.use_cases import (
     EnsureDevUser,
     GetCurrentUser,
@@ -17,11 +27,14 @@ from app.application.discovery.use_cases import (
     CreateCampaign,
     GetCampaign,
     GetOpportunity,
+    GetPage,
     GetPipelineSummary,
     ListApplicationQueue,
     ListCampaigns,
     ListOpportunities,
+    RetryPage,
 )
+from app.application.essay.synthesis import EditEssayDraft, ListEssayDrafts, SynthesizeEssay
 from app.application.essay.use_cases import (
     CreateEssay,
     DeleteEssay,
@@ -47,6 +60,15 @@ from app.application.memory.use_cases import (
     ListMemory,
     RecallMemory,
     UpdateMemory,
+)
+from app.application.notifications.use_cases import (
+    DeleteChannel,
+    ListChannels,
+    RecentNotifications,
+    RecordDeliveryReceipt,
+    SaveChannel,
+    SendTestNotification,
+    VerifyChannel,
 )
 from app.application.profile.use_cases import (
     DeleteDocument,
@@ -107,6 +129,38 @@ class DiscoveryUseCases:
     queue: ListApplicationQueue
     summary: GetPipelineSummary
     runner: ICampaignRunner
+    retry_page: RetryPage
+    get_page: GetPage
+    log_path: Callable[[uuid.UUID], str]
+    spawn: Callable[[Coroutine[Any, Any, None]], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationUseCases:
+    detail: GetApplicationDetail
+    start: StartFilling
+    inbox: GetInbox
+    answer: AnswerQuestion
+    screenshot: GetCheckpointScreenshot
+    synthesize: SynthesizeEssay
+    edit_draft: EditEssayDraft
+    list_drafts: ListEssayDrafts
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationUseCases:
+    save_channel: SaveChannel
+    verify_channel: VerifyChannel
+    list_channels: ListChannels
+    delete_channel: DeleteChannel
+    send_test: SendTestNotification
+    recent: RecentNotifications
+    receipt: RecordDeliveryReceipt
+    twilio_auth_token: str | None
+    meta_app_secret: str | None
+    meta_verify_token: str | None
+    public_api_url: str
+    providers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,3 +187,5 @@ class ApiContainer:
     worker_status: GetWorkerStatus
     vault: VaultUseCases
     discovery: DiscoveryUseCases
+    applications: ApplicationUseCases
+    notifications: NotificationUseCases

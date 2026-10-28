@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -96,6 +97,12 @@ class IEssayRepository(Protocol):
     ) -> None: ...
 
     async def chunk_count(self, user_id: uuid.UUID) -> int: ...
+
+    async def nearest_chunks(
+        self, user_id: uuid.UUID, vector: Sequence[float], embedding_model: str, k: int
+    ) -> builtins.list[tuple[str, float]]:
+        """(chunk text, cosine similarity) of the user's reference essays."""
+        ...
 
 
 class IFingerprintRepository(Protocol):

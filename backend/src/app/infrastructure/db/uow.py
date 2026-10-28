@@ -7,11 +7,21 @@ from typing import Self
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.infrastructure.db.repositories.applications import (
+    SqlApplicationDetailRepository,
+    SqlChannelRepository,
+    SqlCheckpointRepository,
+    SqlEssayDraftRepository,
+    SqlFieldRepository,
+    SqlNotificationRepository,
+    SqlQuestionRepository,
+)
 from app.infrastructure.db.repositories.discovery import (
     SqlApplicationRepository,
     SqlCampaignRepository,
     SqlCrawledPageRepository,
     SqlOpportunityRepository,
+    SqlPlaybookRepository,
     SqlVerdictRepository,
 )
 from app.infrastructure.db.repositories.events import SqlAuditLog, SqlEventOutbox
@@ -81,6 +91,14 @@ class SqlAlchemyUnitOfWork:
         self.opportunities = SqlOpportunityRepository(session)
         self.verdicts = SqlVerdictRepository(session)
         self.applications = SqlApplicationRepository(session)
+        self.playbooks = SqlPlaybookRepository(session)
+        self.app_details = SqlApplicationDetailRepository(session)
+        self.fields = SqlFieldRepository(session)
+        self.questions = SqlQuestionRepository(session)
+        self.checkpoints = SqlCheckpointRepository(session)
+        self.essay_drafts = SqlEssayDraftRepository(session)
+        self.channels = SqlChannelRepository(session)
+        self.notifications = SqlNotificationRepository(session)
         return self
 
     async def __aexit__(

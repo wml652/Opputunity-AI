@@ -1,6 +1,6 @@
 @echo off
-rem One-click launcher for Opportunity Mission Control. Safe to double-click repeatedly.
-title Opportunity Mission Control
+rem One-click launcher for OPPORTUNITIES ON THE GO. Safe to double-click repeatedly.
+title OPPORTUNITIES ON THE GO
 cd /d "%~dp0"
 set "PY=backend\.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
