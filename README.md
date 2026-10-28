@@ -29,6 +29,12 @@ The launcher enables `DEV_AUTH_BYPASS=true` (local dev only), so you land on the
 logging in. `next dev` uses `.next-dev/` and `next build` uses `.next/`, so builds never break a
 running dev server; a stale dev cache is detected and cleared automatically.
 
+### Discovery sources
+
+Web search works with zero keys (DuckDuckGo via `ddgs`). For better results, add `TAVILY_API_KEY`
+and/or `BRAVE_API_KEY` to `backend/.env` and restart. Headless Chromium is installed with
+`uv run playwright install chromium`; without it the crawler falls back to plain HTTP.
+
 ## Native local setup (no Docker)
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/), Node 20+ with `pnpm`, a PostgreSQL 16 database

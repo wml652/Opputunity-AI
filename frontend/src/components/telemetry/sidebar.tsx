@@ -17,8 +17,8 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/", label: "Pipeline" },
       { href: "/inbox", label: "Action Inbox", milestone: "M4" },
-      { href: "/campaigns", label: "Campaigns", milestone: "M3" },
-      { href: "/opportunities", label: "Opportunities", milestone: "M3" },
+      { href: "/campaigns", label: "Campaigns" },
+      { href: "/opportunities", label: "Opportunities" },
     ],
   },
   {

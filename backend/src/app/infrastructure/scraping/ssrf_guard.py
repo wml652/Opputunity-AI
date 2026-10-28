@@ -52,6 +52,14 @@ def is_public_ip(raw: str) -> bool:
     )
 
 
+def _ip_literal(host: str) -> str | None:
+    candidate = host.strip("[]").split("%", 1)[0]
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
 class SsrfGuard:
     def __init__(
         self,
@@ -100,8 +108,16 @@ class SsrfGuard:
         if not self._allow_private:
             if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
                 raise UnsafeUrlError("internal hostnames are not allowed")
+            literal = _ip_literal(host)
+            if literal is not None:
+                # IP literals are judged directly, never via DNS (a resolver cannot launder them).
+                if not is_public_ip(literal):
+                    raise UnsafeUrlError("URL points to a non-public address")
+                addresses = [literal]
+            else:
+                addresses = []
             try:
-                addresses = await self._resolve(host, port)
+                addresses = addresses or await self._resolve(host, port)
             except OSError as exc:
                 raise UnsafeUrlError("host does not resolve") from exc
             if not addresses:

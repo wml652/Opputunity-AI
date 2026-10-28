@@ -156,7 +156,25 @@ class PlaywrightFetcher:
                 blocked.append(request_url)
                 await route.abort("blockedbyclient")
                 return
-            await route.continue_()
+            # Chromium follows redirects internally WITHOUT re-entering this handler, so the
+            # request is performed here with redirects disabled and every Location is validated
+            # before the browser is allowed to follow it (the next hop re-enters the handler).
+            try:
+                response = await route.fetch(max_redirects=0, timeout=self._timeout_ms)
+            except Exception:  # noqa: BLE001 - network failure for this one request
+                await route.abort("failed")
+                return
+            if 300 <= response.status < 400:
+                location = response.headers.get("location")
+                if location:
+                    target = urljoin(request_url, location)
+                    try:
+                        await self._guard.validate(target)
+                    except UnsafeUrlError:
+                        blocked.append(target)
+                        await route.abort("blockedbyclient")
+                        return
+            await route.fulfill(response=response)
 
         await context.route("**/*", guard_route)
         page = await context.new_page()
@@ -173,7 +191,7 @@ class PlaywrightFetcher:
                 return FetchedPage(
                     url, final, None, "", blocked=True, error=f"SSRF guard blocked {blocked[0]}"
                 )
-            return FetchedPage(url, final, status, html)
+            return FetchedPage(url, final, status, html, blocked_requests=len(blocked))
         except Exception as exc:  # noqa: BLE001 - navigation errors become a failed page
             if blocked:
                 return FetchedPage(
@@ -213,4 +231,6 @@ def playwright_available() -> bool:
     )
     if not base.exists():
         base = Path.home() / ".cache/ms-playwright"
-    return any(base.glob("chromium-*")) if base.exists() else False
+    # Headless mode uses the "chromium_headless_shell" build; Playwright writes the marker file
+    # only after a download fully completes.
+    return base.exists() and any(base.glob("chromium_headless_shell-*/INSTALLATION_COMPLETE"))

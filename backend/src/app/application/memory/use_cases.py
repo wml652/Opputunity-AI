@@ -38,7 +38,7 @@ class LearnAnswer:
     """Store a Q&A pair with its question embedding.
 
     Memory matches a question against stored questions, so both sides are embedded the same way
-    (`embed_query`). Measured on nemotron-3.5-embed-1b: identical/reworded questions score
+    (`embed_query`). Measured on a live 1024-d retrieval model: identical/reworded questions score
     0.94-1.00, loose paraphrases 0.45-0.60, unrelated 0.13-0.17, a clean split at 0.85. The
     asymmetric passage/query mode scored an identical question at only 0.68 (never auto-fills)."""
 

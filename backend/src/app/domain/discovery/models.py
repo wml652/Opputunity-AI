@@ -161,6 +161,7 @@ class FetchedPage:
     html: str
     blocked: bool = False  # SSRF guard refused the URL (or a redirect hop)
     error: str | None = None
+    blocked_requests: int = 0  # subresources/redirects the browser was prevented from loading
 
 
 @dataclass(slots=True)

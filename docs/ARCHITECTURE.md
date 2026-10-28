@@ -535,3 +535,53 @@ The **standard gate** that every milestone must pass:
   reported as `stale`. A re-embed job is future work.
 - **Stage 1 has no LLM tone summary.** It is deterministic metrics only; tone analysis moves to
   the M4 synthesis stage.
+
+### Pre-M3 correction: user-provided models only
+
+Presets carry only `base_url`; the chat model is required user input. A blank embedding model
+means local `HashingEmbedding1024`. The probe script and all model defaults were removed.
+`POST /api/v1/llm/fetch-models` lists `GET /models` for the user's key so they can pick a model.
+See `CLAUDE.md` §4.
+
+### M3: Discovery, Deep Scraping & Eligibility (complete)
+
+**Pipeline:** campaign → CRAWLING → EXTRACTING → EVALUATING → QUEUED → COMPLETED. Every
+transition, page, opportunity, verdict and queue insert is committed with a `pipeline_events` row
+and streamed over SSE.
+
+**Runners:** in-process inside the API by default (dev, `memory://` Redis). With
+`CAMPAIGN_RUNNER=arq`, the API enqueues jobs and `uv run worker --queue discovery` runs them.
+
+**Sources:**
+- **Websites:** Playwright Chromium with a per-request SSRF route guard, falling back to an httpx
+  fetcher that re-validates every redirect hop. Best-first crawl within the site, honouring
+  `robots.txt` and per-host politeness.
+- **Web search:** Tavily → Brave → zero-key ddgs. Keys come from `TAVILY_API_KEY` /
+  `BRAVE_API_KEY`.
+- **LinkedIn:** guest listing cards only, with jitter and a page cap.
+
+**Security:**
+- The sanitizer strips hidden and scripted DOM and invisible characters, applies NFKC, and flags
+  injection attempts.
+- Untrusted text goes inside `<untrusted_document>`, and the model must return Pydantic-validated
+  JSON.
+- The LLM only ever receives the non-PII profile snapshot.
+
+**Eligibility:**
+- Stage 1 is deterministic: deadline (passed → EXPIRED), degree, GPA normalized to /4,
+  nationality and residency with aliases, graduation window.
+- Stage 2 runs on the user's model, only for `other_criteria` that are still undecided.
+- Eligible opportunities become `applications` in state QUEUED via the state machine, ranked by
+  `deadline_at ASC NULLS LAST`.
+
+**Dedupe:**
+- Pages dedupe on content SHA within a campaign.
+- Opportunities dedupe on the unique `(user_id, dedupe_key)` and on embedding cosine > 0.92
+  (exact, per tenant).
+
+**Findings fixed during M3 (both covered by tests):**
+- **Chromium redirect bypass.** Chromium follows HTTP redirects without re-entering
+  `context.route()`. The route handler now fetches with `max_redirects=0` and validates each
+  `Location` before fulfilling.
+- **IP-literal hosts.** The SSRF guard now judges IP-literal hosts directly instead of trusting
+  DNS.

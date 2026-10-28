@@ -4,11 +4,22 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { refreshSession } from "./api";
+import { discoveryKeys } from "./discovery-queries";
 import { keys } from "./queries";
 import { pipelineEventSchema, type PipelineEvent } from "./schemas";
 
 const MAX_EVENTS = 300;
 const STREAM_URL = "/api/v1/events/stream";
+const DISCOVERY_EVENTS = new Set([
+  "campaign.created",
+  "campaign.phase",
+  "campaign.counters",
+  "page.crawled",
+  "search.results",
+  "opportunity.found",
+  "eligibility.verdict",
+  "application.queued",
+]);
 
 export type StreamState = "connecting" | "live" | "reconnecting";
 
@@ -43,6 +54,15 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     let source: EventSource | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    // Counters arrive per page; coalesce cache refreshes to at most one every 400 ms.
+    const scheduleDiscoveryRefresh = () => {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        void qc.invalidateQueries({ queryKey: discoveryKeys.all });
+      }, 400);
+    };
 
     const onEvent = (raw: MessageEvent<string>) => {
       const parsed = pipelineEventSchema.safeParse(JSON.parse(raw.data));
@@ -55,6 +75,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
         void qc.invalidateQueries({ queryKey: keys.status });
         void qc.invalidateQueries({ queryKey: keys.providers });
       }
+      if (DISCOVERY_EVENTS.has(event.type)) scheduleDiscoveryRefresh();
     };
 
     const open = () => {
@@ -85,6 +106,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       stopped = true;
       clearInterval(keepAlive);
       if (retryTimer) clearTimeout(retryTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
       source?.close();
     };
   }, [qc]);
