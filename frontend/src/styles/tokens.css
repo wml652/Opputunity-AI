@@ -1,0 +1,57 @@
+/*
+ * Design tokens — the ONLY place colors are defined (see CLAUDE.md §5).
+ * Neutral graphite/zinc surfaces; status hues are reserved for meaning:
+ *   ok (emerald)   = connected / eligible / success
+ *   warn (amber)   = action needed
+ *   err (crimson)  = failed / error
+ */
+
+:root {
+  --bg: #f6f6f7;
+  --surface: #ffffff;
+  --surface-2: #f1f1f3;
+  --surface-3: #e8e8eb;
+  --border: #e2e2e6;
+  --border-strong: #cfcfd5;
+  --text: #17171a;
+  --text-muted: #55555e;
+  --text-faint: #8c8c96;
+  --inverse: #17171a;
+  --inverse-text: #fafafa;
+
+  --ok: #047857;
+  --ok-soft: #e7f5ef;
+  --warn: #b45309;
+  --warn-soft: #fbf1e3;
+  --err: #b91c1c;
+  --err-soft: #fbeaea;
+
+  --focus: #55555e;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0d;
+    --surface: #111114;
+    --surface-2: #17171b;
+    --surface-3: #1f1f24;
+    --border: #25252b;
+    --border-strong: #35353d;
+    --text: #e6e6ea;
+    --text-muted: #a0a0aa;
+    --text-faint: #6b6b75;
+    --inverse: #e6e6ea;
+    --inverse-text: #0b0b0d;
+
+    --ok: #34d399;
+    --ok-soft: #0d2a20;
+    --warn: #fbbf24;
+    --warn-soft: #2d2208;
+    --err: #f87171;
+    --err-soft: #2e1212;
+
+    --focus: #a0a0aa;
+    color-scheme: dark;
+  }
+}

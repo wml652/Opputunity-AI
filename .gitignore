@@ -1,0 +1,29 @@
+.aider*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.import_linter_cache/
+
+# Node
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Local data
+.pgdata*/
+
+# Launcher
+.logs/
+.storage/
