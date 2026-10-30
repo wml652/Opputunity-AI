@@ -452,6 +452,26 @@ async def batch_prepare(body: BatchIn, user_id: CurrentUserId, container: Contai
     return BatchOut(started=result.started, skipped_no_portal=result.skipped_no_portal)
 
 
+class UnblockOut(BaseModel):
+    application_id: uuid.UUID
+    domain: str
+    url: str
+
+
+@router.post(
+    "/applications/{application_id}/unblock",
+    response_model=UnblockOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def unblock(
+    application_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> UnblockOut:
+    """ "Sign In in Browser & Resume": a visible browser opens at the portal; once the user has
+    signed in, the cookies are saved (encrypted) and the application resumes with them."""
+    started = await container.applications.unblock.execute(user_id, application_id)
+    return UnblockOut(application_id=started.application_id, domain=started.domain, url=started.url)
+
+
 @router.get("/applications/{application_id}/verification", response_model=VerificationOut)
 async def verification(
     application_id: uuid.UUID, user_id: CurrentUserId, container: Container

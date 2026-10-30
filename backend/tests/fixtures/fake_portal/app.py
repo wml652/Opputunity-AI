@@ -9,6 +9,7 @@
 Drafts live server-side keyed by a session cookie, so resuming requires the browser's saved
 storage_state; after /__wipe the portal redirects to step 1 and the filler must replay.
 `?v=2` serves the same form under a different opportunity (same custom question).
+`?v=members` sits behind a sign-in wall unless the browser carries the `portal_auth=ok` cookie.
 """
 
 from __future__ import annotations
@@ -61,6 +62,15 @@ def build_app() -> FastAPI:
     @app.get("/apply")
     async def step1(request: Request, v: str = "1") -> Response:
         STATE.hits["GET /apply"] += 1
+        if v == "members" and request.cookies.get("portal_auth") != "ok":
+            STATE.hits["GET /apply login-wall"] += 1
+            return _page(
+                "Applicant Portal - Sign in",
+                "<form method='post' action='/login'>"
+                "<label for='u'>Email</label><input id='u' name='username' type='email' required>"
+                "<label for='p'>Password</label><input id='p' name='password' type='password'"
+                " required><button type='submit'>Sign in</button></form>",
+            )
         sid, draft = session(request)
         if draft is None:
             sid = uuid.uuid4().hex

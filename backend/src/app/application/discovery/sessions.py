@@ -7,7 +7,7 @@ resulting cookies (`storage_state`) are stored, encrypted with row-bound AAD."""
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -124,7 +124,9 @@ class CaptureBrowserSession:
         *,
         tos_acknowledged: bool = False,
         daily_action_cap: int | None = None,
+        on_captured: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
+        """`on_captured` runs after the cookies are stored (e.g. resume a blocked application)."""
         if self.deps.capturer is None:
             raise ValidationError(
                 "solving challenges needs a visible browser on your own computer; it is only "
@@ -148,7 +150,9 @@ class CaptureBrowserSession:
         if not domain:
             raise ValidationError("URL has no host")
         self.deps.spawn(
-            self._capture(user_id, normalized, domain, kind, tos_acknowledged, daily_action_cap)
+            self._capture(
+                user_id, normalized, domain, kind, tos_acknowledged, daily_action_cap, on_captured
+            )
         )
         return domain
 
@@ -160,6 +164,7 @@ class CaptureBrowserSession:
         kind: str,
         tos_acknowledged: bool,
         daily_action_cap: int | None,
+        on_captured: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         assert self.deps.capturer is not None
         try:
@@ -184,7 +189,7 @@ class CaptureBrowserSession:
                 storage_state=self.deps.cipher.encrypt(
                     state.encode(), aad(BROWSER_SESSION_AAD, "storage_state", user_id, row_id)
                 ),
-                created_at=existing.created_at if existing else now,
+                created_at=now,  # capture time: compared with checkpoints when merging cookies
                 tos_acknowledged_at=now if tos_acknowledged else None,
                 last_used_at=None,
                 expires_at=now + SESSION_TTL,
@@ -214,6 +219,16 @@ class CaptureBrowserSession:
                 )
             )
             await uow.commit()
+        if on_captured is not None:
+            try:
+                await on_captured()
+            except Exception as exc:  # noqa: BLE001 - reported to the user, never raised further
+                await _emit(
+                    self.deps,
+                    user_id,
+                    "session.failed",
+                    {"domain": domain, "kind": kind, "error": f"saved, but: {str(exc)[:250]}"},
+                )
 
 
 @dataclass(slots=True)

@@ -53,6 +53,18 @@ NAV_TIMEOUT_MS = 30_000
 NEXT_RE = re.compile(r"\b(next|continue|proceed|save (and|&) continue|forward)\b", re.I)
 SUBMIT_RE = re.compile(r"\b(submit|send application|apply now|finish)\b", re.I)
 CAPTCHA_RE = re.compile(r"(g-recaptcha|hcaptcha|cf-turnstile|captcha)", re.I)
+LOGIN_WALL_ERROR = (
+    'the portal asks you to sign in; use "Sign In in Browser & Resume" - automation never '
+    "types passwords"
+)
+
+
+async def _is_login_wall(page: Any) -> bool:
+    """A visible password field means a sign-in form: never fill it, never ask for it."""
+    count = await page.locator("input[type=password]:visible").count()
+    return bool(count)
+
+
 TRUTHY = {"yes", "true", "1", "on", "y", "agree", "i agree"}
 
 SCAN_JS = r"""
@@ -106,8 +118,10 @@ class PlaywrightFormFiller:
         resume: ResumeState | None,
         resolver: Resolver,
         documents: dict[uuid.UUID, DocumentBlob],
+        storage_state: str | None = None,
     ) -> FillOutcome:
         await self._guard.validate(portal_url)
+        initial_state = resume.storage_state if resume else storage_state
         from playwright.async_api import async_playwright
 
         proxy = EgressProxy(self._guard)
@@ -127,7 +141,7 @@ class PlaywrightFormFiller:
                     locale="en-US",
                     viewport={"width": 1280, "height": 900},
                     accept_downloads=False,
-                    storage_state=json.loads(resume.storage_state) if resume else None,
+                    storage_state=json.loads(initial_state) if initial_state else None,
                 )
                 page = await context.new_page()
                 page.set_default_timeout(NAV_TIMEOUT_MS)
@@ -183,6 +197,18 @@ class PlaywrightFormFiller:
                     completed,
                     log_lines,
                     error="the portal shows a CAPTCHA; a human must continue",
+                )
+            if await _is_login_wall(page):
+                return await self._outcome(
+                    FillOutcomeKind.BLOCKED,
+                    page,
+                    context,
+                    step_index,
+                    ledger,
+                    replayed,
+                    completed,
+                    log_lines,
+                    error=LOGIN_WALL_ERROR,
                 )
             fields = await _scan(page)
             buttons = await page.evaluate(BUTTONS_JS)
@@ -353,6 +379,10 @@ class PlaywrightFormFiller:
                     SubmitOutcomeKind.BLOCKED,
                     error="the portal shows a CAPTCHA; a human must submit",
                     log=log_lines,
+                )
+            if await _is_login_wall(page):
+                return SubmitOutcome(
+                    SubmitOutcomeKind.BLOCKED, error=LOGIN_WALL_ERROR, log=log_lines
                 )
             fields = await _scan(page)
             buttons = await page.evaluate(BUTTONS_JS)

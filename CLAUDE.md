@@ -60,6 +60,12 @@ Layers, top to bottom. A layer may import only layers below it.
   model call; the model's answer is redacted again. Auto-fill only when model confidence x
   grounding overlap >= 0.85; otherwise the question still pauses, with the suggestion attached.
   PII fields themselves are only ever filled by the deterministic profile mapper.
+- Portal sign-in: the filler never fills, asks for, or stores passwords. A visible
+  `input[type=password]` blocks the run (`BLOCKED_NEEDS_HUMAN`); "Sign In in Browser & Resume"
+  (`UnblockApplication`, `POST /applications/{id}/unblock`) opens the headful capture
+  (`SessionKind.PORTAL`) and resumes only after the encrypted cookies are stored. Fill and submit
+  runs load unexpired PORTAL/CHALLENGE sessions for the portal domain
+  (`application.applications.portal_sessions`); the newer of checkpoint vs session wins per cookie.
 
 ## 3. Windows Native Asyncio & Playwright Compatibility
 

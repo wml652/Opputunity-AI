@@ -9,6 +9,7 @@ import { Input, Textarea } from "@/components/ui/field";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill } from "@/components/ui/status";
 import { cn, formatRelative } from "@/lib/cn";
+import { UnblockButton } from "@/components/applications/unblock-button";
 import { useAnswerQuestion, useInbox, useStartFilling } from "@/lib/m4-queries";
 import type { InboxAppT, InboxQuestionT } from "@/lib/m4-schemas";
 
@@ -167,7 +168,7 @@ function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked
             <th className={th}>Opportunity</th>
             <th className={cn(th, "w-32")}>State</th>
             <th className={cn(th, "w-28")}>Deadline</th>
-            <th className={cn(th, "w-40")} />
+            <th className={cn(th, kind === "blocked" ? "w-[30rem]" : "w-40")} />
           </tr>
         </thead>
         <tbody>
@@ -187,7 +188,10 @@ function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked
                 <td className={cn(td, "text-right")}>
                   <div className="flex justify-end gap-1">
                     {kind === "blocked" ? (
-                      <Button size="sm" onClick={() => start.mutate(a.id)} disabled={start.isPending}>Retry</Button>
+                      <>
+                        <UnblockButton applicationId={a.id} />
+                        <Button size="sm" onClick={() => start.mutate(a.id)} disabled={start.isPending}>Retry</Button>
+                      </>
                     ) : null}
                     {kind === "ready" ? (
                       <Button size="sm" variant="primary" onClick={() => setVerifying(a.id)}>

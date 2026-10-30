@@ -37,8 +37,10 @@ class IFormFiller(Protocol):
         resume: ResumeState | None,
         resolver: Resolver,
         documents: dict[uuid.UUID, DocumentBlob],
+        storage_state: str | None = None,
     ) -> FillOutcome:
-        """Fill step by step up to (never clicking) the final Submit."""
+        """Fill step by step up to (never clicking) the final Submit. `storage_state` (saved
+        portal sign-in / challenge cookies) seeds a fresh run; `resume` carries its own."""
         ...
 
     async def submit(

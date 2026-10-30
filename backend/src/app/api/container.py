@@ -13,6 +13,7 @@ from app.application.applications.submission import (
     GetVerification,
     RejectApplication,
 )
+from app.application.applications.unblock import UnblockApplication
 from app.application.applications.use_cases import (
     AnswerQuestion,
     BatchPrepare,
@@ -176,6 +177,7 @@ class ApplicationUseCases:
     approve: ApproveSubmission
     reject: RejectApplication
     receipt: GetReceiptScreenshot
+    unblock: UnblockApplication
 
 
 @dataclass(frozen=True, slots=True)

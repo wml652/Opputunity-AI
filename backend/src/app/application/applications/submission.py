@@ -18,6 +18,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
+from app.application.applications.portal_sessions import (
+    combine_with_checkpoint,
+    saved_portal_state,
+)
 from app.application.applications.use_cases import (
     CHECKPOINT_TABLE,
     ApplicationDeps,
@@ -332,12 +336,24 @@ class RunSubmission:
         elif not opp.portal_url:
             outcome = SubmitOutcome(SubmitOutcomeKind.ERROR, error="no portal URL")
         else:
-            storage_state = None
+            session_state, session_at = await saved_portal_state(
+                self.deps.uow_factory,
+                self.deps.cipher,
+                self.deps.clock.now(),
+                user_id,
+                opp.portal_url,
+            )
+            storage_state = session_state
             if checkpoint is not None:
-                storage_state = self.deps.cipher.decrypt(
-                    checkpoint.storage_state,
-                    aad(CHECKPOINT_TABLE, "storage_state", user_id, checkpoint.checkpoint.id),
-                ).decode()
+                storage_state = combine_with_checkpoint(
+                    self.deps.cipher.decrypt(
+                        checkpoint.storage_state,
+                        aad(CHECKPOINT_TABLE, "storage_state", user_id, checkpoint.checkpoint.id),
+                    ).decode(),
+                    checkpoint.checkpoint.created_at,
+                    session_state,
+                    session_at,
+                )
             blobs: dict[uuid.UUID, DocumentBlob] = {}
             for doc in documents:
                 _, data = await self.deps.download.execute(user_id, doc.id)

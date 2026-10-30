@@ -8,12 +8,14 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .import_linter_cache/
 
 # Node
 node_modules/
-.next/
+.next*/
 *.tsbuildinfo
 
 # Env / secrets
@@ -22,8 +24,11 @@ node_modules/
 !.env.example
 
 # Local data
-.pgdata*/
+.pgdata*
 
 # Launcher
 .logs/
 .storage/
+
+# Scratch
+.audit/

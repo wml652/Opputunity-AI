@@ -1,6 +1,0 @@
-{"model": "nvidia/nemotron-3-ultra-550b-a55b"}
-{"ok": false, "error": "LLMHttpError: request timed out", "case": "study-abroad / trafilatura", "md_chars": 14004, "md_headings": 33, "md_links": 5, "secs": 188.1, "attempts": []}
-{"ok": false, "error": "LLMHttpError: request timed out", "case": "study-abroad / bs-fallback", "md_chars": 19851, "md_headings": 39, "md_links": 73, "secs": 184.8, "attempts": []}
-{"ok": false, "error": "LLMHttpError: request timed out", "case": "scholarships.com / trafilatura", "md_chars": 15125, "md_headings": 20, "md_links": 16, "secs": 213.6, "attempts": []}
-{"ok": false, "error": "LLMHttpError: request timed out", "case": "opportunitiesradar home / trafilatura", "md_chars": 5145, "md_headings": 0, "md_links": 0, "secs": 186.7, "attempts": []}
-{"ok": false, "error": "LLMHttpError: request timed out", "case": "opportunitiesradar home / bs-fallback", "md_chars": 12135, "md_headings": 78, "md_links": 14, "secs": 184.4, "attempts": []}

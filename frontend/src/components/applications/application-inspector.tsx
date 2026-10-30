@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/field";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill, type Tone } from "@/components/ui/status";
 import { cn, formatRelative } from "@/lib/cn";
+import { UnblockButton } from "@/components/applications/unblock-button";
 import { useApplication, useEditDraft, useStartFilling } from "@/lib/m4-queries";
 import type { ApplicationDetailT, DraftT } from "@/lib/m4-schemas";
 
@@ -46,8 +47,9 @@ export function ApplicationInspector({ id }: { id: string }) {
         meta={`${o.organization ?? "unknown organization"} · v${a.version}`}
         actions={
           <>
+            {a.state === "BLOCKED_NEEDS_HUMAN" && o.portal_url ? <UnblockButton applicationId={a.id} /> : null}
             {STARTABLE.has(a.state) ? (
-              <Button size="sm" variant="primary" onClick={() => start.mutate(a.id)} disabled={start.isPending}>
+              <Button size="sm" variant={a.state === "BLOCKED_NEEDS_HUMAN" ? "secondary" : "primary"} onClick={() => start.mutate(a.id)} disabled={start.isPending}>
                 {a.state === "BLOCKED_NEEDS_HUMAN" ? "Retry filling" : "Start filling"}
               </Button>
             ) : null}

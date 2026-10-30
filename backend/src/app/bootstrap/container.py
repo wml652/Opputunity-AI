@@ -30,6 +30,7 @@ from app.application.applications.submission import (
     RunSubmission,
     SweepDeadlines,
 )
+from app.application.applications.unblock import UnblockApplication
 from app.application.applications.use_cases import (
     AnswerQuestion,
     ApplicationDeps,
@@ -600,9 +601,10 @@ def build_applications(infra: Infrastructure) -> ApplicationUseCases:
     deps = build_application_deps(infra)
     runner = build_application_runner(infra)
     engine = deps.essays
+    start = StartFilling(infra.uow_factory, infra.clock, runner)
     return ApplicationUseCases(
         detail=GetApplicationDetail(infra.uow_factory, infra.cipher),
-        start=StartFilling(infra.uow_factory, infra.clock, runner),
+        start=start,
         inbox=GetInbox(infra.uow_factory),
         answer=AnswerQuestion(deps, runner),
         screenshot=GetCheckpointScreenshot(infra.uow_factory, infra.cipher, infra.storage),
@@ -614,6 +616,7 @@ def build_applications(infra: Infrastructure) -> ApplicationUseCases:
         approve=ApproveSubmission(deps, runner.submit),
         reject=RejectApplication(infra.uow_factory, infra.clock),
         receipt=GetReceiptScreenshot(deps),
+        unblock=UnblockApplication(infra.uow_factory, build_sessions(infra).capture, start),
     )
 
 

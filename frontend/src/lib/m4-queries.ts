@@ -99,6 +99,23 @@ export function useBatchPrepare() {
   });
 }
 
+const unblockSchema = z.object({
+  application_id: z.string().uuid(),
+  domain: z.string(),
+  url: z.string(),
+});
+
+/** "Sign In in Browser & Resume": opens a visible browser at the portal; after the user signs in
+ * the cookies are saved (encrypted) and the blocked application resumes with them. */
+export function useUnblockApplication() {
+  const invalidate = useInvalidateApplications();
+  return useMutation({
+    mutationFn: (applicationId: string) =>
+      api(`/api/v1/applications/${applicationId}/unblock`, { method: "POST", schema: unblockSchema }),
+    onSuccess: invalidate,
+  });
+}
+
 export function useAnswerQuestion() {
   const invalidate = useInvalidateApplications();
   return useMutation({

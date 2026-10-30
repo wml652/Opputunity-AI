@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from app.application.applications.portal_sessions import (
+    combine_with_checkpoint,
+    saved_portal_state,
+)
 from app.application.essay.synthesis import EssayRequest, SynthesizeEssay
 from app.application.memory.use_cases import LearnAnswer, RecallMemory, UpdateMemory
 from app.application.notifications.use_cases import NotifyUser
@@ -318,6 +322,11 @@ class RunApplication:
                 await uow3.commit()
             return resolutions
 
+        assert opp.portal_url is not None
+        # Cookies from a portal sign-in / solved challenge the user did in a visible browser.
+        session_state, session_at = await saved_portal_state(
+            self.deps.uow_factory, self.deps.cipher, self.deps.clock.now(), user_id, opp.portal_url
+        )
         resume = None
         if checkpoint is not None:
             state = self.deps.cipher.decrypt(
@@ -328,11 +337,17 @@ class RunApplication:
                 url=checkpoint.checkpoint.url,
                 step_index=checkpoint.checkpoint.step_index,
                 dom_fingerprint=checkpoint.checkpoint.dom_fingerprint,
-                storage_state=state,
+                storage_state=combine_with_checkpoint(
+                    state, checkpoint.checkpoint.created_at, session_state, session_at
+                )
+                or state,
             )
-        assert opp.portal_url is not None
         return await self.deps.filler.run(
-            opp.portal_url, resume=resume, resolver=resolver, documents=blobs
+            opp.portal_url,
+            resume=resume,
+            resolver=resolver,
+            documents=blobs,
+            storage_state=session_state,
         )
 
     async def _facts(self, user_id: uuid.UUID) -> dict[str, str]:
