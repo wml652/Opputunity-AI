@@ -45,6 +45,10 @@ from app.infrastructure.db.repositories.vault import vector_literal
 # ---- campaigns ----------------------------------------------------------------------------------
 
 
+_DEDUPED_STATUSES = (CrawlStatus.DISTILLED, CrawlStatus.EXTRACTED)
+_DEDUPED_CONTENT = text("content_sha256 IS NOT NULL AND status IN ('DISTILLED', 'EXTRACTED')")
+
+
 class SqlCampaignRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
@@ -183,6 +187,20 @@ class SqlCampaignRepository:
         )
         return int(result.rowcount)  # type: ignore[attr-defined]
 
+    async def active_for_user(self, user_id: uuid.UUID) -> Campaign | None:
+        row = await self._s.scalar(
+            select(CampaignRow)
+            .where(
+                CampaignRow.user_id == user_id,
+                CampaignRow.status.in_([CampaignStatus.RUNNING, CampaignStatus.DRAFT]),
+            )
+            .order_by(CampaignRow.created_at.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        return self._campaign(row, (await self._sources(user_id, [row.id]))[row.id])
+
     async def status_of(self, user_id: uuid.UUID, campaign_id: uuid.UUID) -> CampaignStatus | None:
         return await self._s.scalar(
             select(CampaignRow.status).where(
@@ -250,7 +268,12 @@ class SqlCrawledPageRepository:
                 discovery_query=page.discovery_query,
                 strategy=page.strategy,
             )
-            .on_conflict_do_nothing(constraint="uq_crawled_pages_campaign_sha")
+            # Partial unique index: only successful content dedupes; failed/empty pages that
+            # share an identical (empty) body are all kept.
+            .on_conflict_do_nothing(
+                index_elements=["campaign_id", "content_sha256"],
+                index_where=_DEDUPED_CONTENT,
+            )
             .returning(CrawledPageRow.id)
         )
         return (await self._s.scalar(stmt)) is not None
@@ -291,11 +314,12 @@ class SqlCrawledPageRepository:
         }
         # Keep the content hash unique per campaign: only take the new hash if it is free.
         clash = None
-        if page.content_sha256:
+        if page.content_sha256 and page.status in _DEDUPED_STATUSES:
             clash = await self._s.scalar(
                 select(CrawledPageRow.id).where(
                     CrawledPageRow.campaign_id == page.campaign_id,
                     CrawledPageRow.content_sha256 == page.content_sha256,
+                    CrawledPageRow.status.in_(_DEDUPED_STATUSES),
                     CrawledPageRow.id != page.id,
                 )
             )
@@ -408,6 +432,22 @@ class SqlOpportunityRepository:
             },
         )
         return inserted is not None
+
+    async def recent_titles(
+        self, user_id: uuid.UUID, limit: int
+    ) -> list[tuple[uuid.UUID, str, str | None, str | None]]:
+        rows = await self._s.execute(
+            select(
+                OpportunityRow.id,
+                OpportunityRow.title,
+                OpportunityRow.organization,
+                OpportunityRow.portal_url,
+            )
+            .where(OpportunityRow.user_id == user_id)
+            .order_by(OpportunityRow.created_at.desc())
+            .limit(limit)
+        )
+        return [(r[0], r[1], r[2], r[3]) for r in rows]
 
     async def most_similar(
         self, user_id: uuid.UUID, vector: Sequence[float], embedding_model: str
@@ -649,6 +689,7 @@ class SqlPlaybookRepository:
                 successes=r.successes,
                 last_campaign_id=r.last_campaign_id,
                 updated_at=r.updated_at,
+                bot_challenge=dict(r.bot_challenge) if r.bot_challenge else None,
             )
             for r in rows
         }
@@ -662,6 +703,7 @@ class SqlPlaybookRepository:
             "successes": playbook.successes,
             "last_campaign_id": playbook.last_campaign_id,
             "updated_at": playbook.updated_at,
+            "bot_challenge": playbook.bot_challenge,
         }
         stmt = pg_insert(DomainPlaybookRow).values(
             id=playbook.id, user_id=playbook.user_id, domain=playbook.domain, **values

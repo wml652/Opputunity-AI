@@ -11,12 +11,15 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 
+from app.domain.discovery.listing import HarvestedCard, PageKind
 from app.domain.ports.discovery import ProcessedPage
 from app.infrastructure.scraping.sanitizer import clean_text, sanitize_html
+from app.infrastructure.scraping.segmenter import ListingSegmenter
 
 logging.getLogger("trafilatura").setLevel(logging.ERROR)
 
-MAX_MARKDOWN_CHARS = 60_000
+MAX_MARKDOWN_CHARS = 80_000
+LISTING_INTRO_CHARS = 1_500
 _BLANKS = re.compile(r"\n{3,}")
 
 
@@ -69,15 +72,22 @@ def _fallback_markdown(soup: BeautifulSoup, base_url: str) -> str:
 
 
 class HtmlContentProcessor:
+    """Sanitize -> classify -> distill. Article/detail pages go through trafilatura (BeautifulSoup
+    walker as fallback). Hub/listing pages additionally run the DOM card segmenter, whose
+    `[Title](URL) | Deadline | snippet` lines are appended so links and deadlines survive."""
+
+    def __init__(self) -> None:
+        self._segmenter = ListingSegmenter()
+
     def process(self, html: str, url: str) -> ProcessedPage:
         soup, flags = sanitize_html(html)
         title_tag = BeautifulSoup(html, "html.parser").find("title")
         title = clean_text(" ".join(title_tag.get_text(" ").split())) if title_tag else None
-        markdown = ""
+        prose = ""
         try:
             import trafilatura
 
-            markdown = (
+            prose = (
                 trafilatura.extract(
                     str(soup),
                     url=url,
@@ -90,18 +100,63 @@ class HtmlContentProcessor:
                 or ""
             )
         except Exception:  # noqa: BLE001 - fall back to the deterministic walker
-            markdown = ""
-        if len(markdown) < 200:
+            prose = ""
+        used_fallback = False
+        fallback = ""
+        if len(prose) < 200:
             fallback = _fallback_markdown(soup, url)
-            if len(fallback) > len(markdown):
-                markdown = fallback
+            if len(fallback) > len(prose):
+                prose, used_fallback = fallback, True
+        else:
+            # trafilatura sometimes picks a long "related posts" / comments block as the main
+            # content and drops the real article. If the page's own <h1> title is missing from
+            # its output but present in the full page, keep the full page: the in-page RAG filter
+            # later removes the boilerplate before extraction.
+            headline = _headline(soup)
+            if headline and headline.lower() not in prose.lower():
+                fallback = _fallback_markdown(soup, url)
+                if headline.lower() in fallback.lower():
+                    prose, used_fallback = fallback, True
+        analysis = self._segmenter.analyze(soup, url)
+        if analysis.kind == PageKind.LISTING:
+            intro = prose[:LISTING_INTRO_CHARS].rsplit("\n", 1)[0] if prose else ""
+            markdown = _compose(title, intro, analysis.cards)
+        elif analysis.kind == PageKind.MIXED:
+            markdown = _compose(None, prose, analysis.cards)
+        else:
+            markdown = prose
         markdown = clean_text(_BLANKS.sub("\n\n", markdown)).strip()[:MAX_MARKDOWN_CHARS]
         return ProcessedPage(
             title=title or None,
             markdown=markdown,
             content_sha256=hashlib.sha256(markdown.encode()).hexdigest(),
             injection_flags=flags,
+            kind=analysis.kind,
+            cards=analysis.cards,
+            diagnostics={
+                **analysis.stats,
+                "prose_chars": len(prose),
+                "prose_source": "bs_fallback" if used_fallback else "trafilatura",
+            },
         )
+
+
+def _headline(soup: BeautifulSoup) -> str | None:
+    h1 = soup.find("h1")
+    text = " ".join(h1.get_text(" ").split()) if h1 else ""
+    return text if len(text) >= 8 else None
+
+
+def _compose(title: str | None, prose: str, cards: list[HarvestedCard]) -> str:
+    parts: list[str] = []
+    if title:
+        parts.append(f"# {title}")
+    if prose.strip():
+        parts.append(prose.strip())
+    if cards:
+        parts.append(f"## Listing cards ({len(cards)})")
+        parts.append("\n".join(card.to_markdown() for card in cards))
+    return "\n\n".join(parts)
 
 
 def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:

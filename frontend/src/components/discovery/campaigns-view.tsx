@@ -27,6 +27,7 @@ const PAGE_TONE: Record<string, Tone> = {
   BLOCKED_SSRF: "err",
   FAILED: "err",
   SKIPPED: "idle",
+  BLOCKED_BOT_CHALLENGE: "warn",
 };
 
 export function CampaignsView() {
@@ -104,6 +105,9 @@ function CampaignDetail({ id }: { id: string | null }) {
     ["failed", counters.pages_failed ?? 0],
     ["skipped", counters.pages_skipped ?? 0],
     ["adapted", counters.adapted ?? 0],
+    ["challenges", counters.bot_challenges ?? 0],
+    ["hubs", counters.hubs_harvested ?? 0],
+    ["details", counters.details_queued ?? 0],
     ["found", counters.opportunities_found ?? 0],
     ["dupes", counters.duplicates ?? 0],
     ["eligible", counters.eligible ?? 0],
@@ -125,7 +129,7 @@ function CampaignDetail({ id }: { id: string | null }) {
         ) : null
       }
     >
-      <div className="grid grid-cols-6 gap-px border-b border-line bg-line">
+      <div className="grid grid-cols-5 gap-px border-b border-line bg-line">
         {stats.map(([label, value]) => (
           <div key={label} className="bg-surface px-2 py-1.5">
             <div className="text-[10px] uppercase tracking-wide text-faint">{label}</div>

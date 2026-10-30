@@ -72,8 +72,65 @@ async def _grant(db_dsn: str) -> None:
         await conn.close()
 
 
+PG_START_TIMEOUT_S = 300
+PG_LOG = BACKEND.parent / ".logs" / "postgres.log"
+
+
+def _start_postgres() -> None:
+    """Start the embedded server ourselves, robustly, before pgserver attaches to it.
+
+    pgserver gives `pg_ctl start` only 10 s and writes the server log INSIDE the data directory.
+    After an unclean shutdown (PC switched off, process killed) Postgres runs crash recovery,
+    which fsyncs the whole data directory - including that open log file, which Windows refuses
+    ("sharing violation", retried for 30 s). Recovery then takes > 10 s, pgserver kills it, the
+    data directory stays "interrupted", and every later launch fails the same way.
+
+    Here: log OUTSIDE the data dir (no sharing violation) and wait up to 5 minutes, so recovery
+    always completes. pgserver then finds the running server and reuses it."""
+    from pgserver._commands import POSTGRES_BIN_PATH
+    from pgserver.utils import PostmasterInfo, find_suitable_port
+
+    info = PostmasterInfo.read_from_pgdata(DATA_DIR)
+    if info is not None and info.is_running():
+        return  # already up (pgserver reuses it)
+    if not (DATA_DIR / "PG_VERSION").exists():
+        return  # first run: let pgserver initdb and start it
+    stale = DATA_DIR / "postmaster.pid"
+    if stale.exists():
+        stale.unlink()  # left by a crash; the process it names is gone (checked above)
+    PG_LOG.parent.mkdir(parents=True, exist_ok=True)
+    port = find_suitable_port("127.0.0.1")
+    print(f"starting embedded PostgreSQL on 127.0.0.1:{port} (crash recovery may take a while)")
+    subprocess.run(  # noqa: S603 - fixed binary path, no user input
+        [
+            str(POSTGRES_BIN_PATH / ("pg_ctl.exe" if os.name == "nt" else "pg_ctl")),
+            "-D",
+            str(DATA_DIR),
+            "-w",
+            "-t",
+            str(PG_START_TIMEOUT_S),
+            "-o",
+            '-h "127.0.0.1"',
+            "-o",
+            f"-p {port}",
+            "-l",
+            str(PG_LOG),
+            "start",
+        ],
+        check=True,
+        timeout=PG_START_TIMEOUT_S + 30,
+        # The postmaster outlives pg_ctl: never let it inherit our stdout/stderr (it would hold
+        # the launcher's log file / a caller's pipe open forever). Its own log is PG_LOG.
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print("embedded PostgreSQL is up")
+
+
 def main() -> None:
     DATA_DIR.mkdir(exist_ok=True)
+    _start_postgres()
     server = pgserver.get_server(str(DATA_DIR), cleanup_mode=None)  # keep running after exit
     admin_uri: str = server.get_uri()
     base = admin_uri.rsplit("/", 1)[0]  # postgresql://postgres:@127.0.0.1:PORT

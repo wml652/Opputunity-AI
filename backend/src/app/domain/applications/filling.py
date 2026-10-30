@@ -48,6 +48,7 @@ class FieldResolution:
     essay_draft_id: uuid.UUID | None = None
     suggestion: str | None = None  # best guess shown to the user when escalating
     note: str = ""
+    evidence: str | None = None  # PII-redacted snippet the answer is grounded in (evidence RAG)
 
     @property
     def fillable(self) -> bool:
@@ -79,6 +80,7 @@ class ApplicationField:
     essay_draft_id: uuid.UUID | None
     user_edited: bool
     updated_at: datetime
+    evidence: str | None = None  # PII-redacted source snippet behind an evidence-RAG answer
 
 
 @dataclass(slots=True)

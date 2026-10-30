@@ -15,7 +15,12 @@ from arq.connections import RedisSettings
 from arq.worker import Worker
 
 from app.application.discovery.use_cases import RunCampaign
-from app.bootstrap.container import build_discovery_deps, build_infrastructure, build_relay
+from app.bootstrap.container import (
+    build_discovery_deps,
+    build_infrastructure,
+    build_maintenance,
+    build_relay,
+)
 from app.infrastructure.config.settings import get_settings
 from app.infrastructure.events.outbox_relay import OutboxRelayLoop
 from app.infrastructure.logging import configure_logging, get_logger
@@ -23,6 +28,7 @@ from app.infrastructure.runtime.event_loop import IS_WINDOWS, configure_event_lo
 from app.infrastructure.workers.tasks import (
     QUEUES,
     heartbeat,
+    maintenance,
     make_worker_id,
     ping,
     relay_outbox,
@@ -43,6 +49,7 @@ def build_worker(queue_name: str) -> Worker:
         )
     infra = build_infrastructure(settings)
     relay = build_relay(infra)
+    reap_leases, sweep_deadlines = build_maintenance(infra)
     relay_loop: OutboxRelayLoop | None = None
 
     async def on_startup(ctx: dict[str, Any]) -> None:
@@ -50,6 +57,8 @@ def build_worker(queue_name: str) -> Worker:
         ctx.update(
             run_campaign=RunCampaign(build_discovery_deps(infra)),
             relay=relay,
+            reap_leases=reap_leases,
+            sweep_deadlines=sweep_deadlines,
             registry=infra.worker_registry,
             worker_id=make_worker_id(queue_name),
             queue_name=queue_name,
@@ -74,9 +83,10 @@ def build_worker(queue_name: str) -> Worker:
     cron_jobs = [cron(heartbeat, second=_HEARTBEAT_SECONDS, run_at_startup=False)]
     if queue_name == "system":
         cron_jobs.append(cron(relay_outbox, second={5, 35}, run_at_startup=False))
+        cron_jobs.append(cron(maintenance, minute=set(range(0, 60, 5)), run_at_startup=True))
 
     return Worker(
-        functions=[ping, relay_outbox, run_campaign],
+        functions=[ping, relay_outbox, run_campaign, maintenance],
         cron_jobs=cron_jobs,
         queue_name=f"arq:{queue_name}",
         redis_settings=RedisSettings.from_dsn(settings.redis_url),

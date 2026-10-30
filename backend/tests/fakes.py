@@ -6,6 +6,7 @@ records every prompt so tests can assert what the model was (and was not) shown.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Sequence
@@ -13,16 +14,17 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.domain.llm.provider import HandshakeResult
+from app.domain.llm.provider import ConnectionErrorCode, HandshakeResult
 from app.domain.ports.llm import ChatMessage, Completion
+from app.infrastructure.llm.http_client import LLMHttpError
 
 FIELD = re.compile(r"^\s*(?:[-*]\s*)?([A-Za-z ]{2,20}):\s*(.+?)\s*$", re.M)
 
 
-def _extraction_reply(document: str) -> str:
-    fields = {k.strip().lower(): v.strip() for k, v in FIELD.findall(document)}
+def _one_opportunity(block: str) -> dict[str, object] | None:
+    fields = {k.strip().lower(): v.strip() for k, v in FIELD.findall(block)}
     if "title" not in fields:
-        return json.dumps({"opportunities": []})
+        return None
     gpa, scale = None, None
     if "min gpa" in fields:
         g, _, s = fields["min gpa"].partition("/")
@@ -32,7 +34,7 @@ def _extraction_reply(document: str) -> str:
         if fields.get("nationality", "").lower() in ("", "any")
         else [n.strip() for n in fields["nationality"].split(",")]
     )
-    opp = {
+    return {
         "title": fields["title"],
         "organization": fields.get("organization"),
         "type": fields.get("type", "OTHER"),
@@ -48,7 +50,45 @@ def _extraction_reply(document: str) -> str:
             "other_criteria": [fields["other"]] if "other" in fields else [],
         },
     }
-    return "```json\n" + json.dumps({"opportunities": [opp]}) + "\n```"
+
+
+TITLE_SPLIT = re.compile(r"(?=^\s*(?:[-*]\s*)?Title:)", re.M)
+
+
+def _extraction_reply(document: str) -> str:
+    """One opportunity per "Title:" block, like a model reading a multi-item page."""
+    opps = [o for o in (_one_opportunity(b) for b in TITLE_SPLIT.split(document)) if o]
+    return "```json\n" + json.dumps({"opportunities": opps}) + "\n```"
+
+
+EVIDENCE_LINE = re.compile(r"^\[(\d+)\][^\n]*$", re.M)
+
+
+def _evidence_reply(user: str) -> str:
+    """Answer like a careful model: find an evidence line whose label shares the question's key
+    words ("Programming languages: ...") and answer with its value; otherwise not answerable."""
+    question = re.search(r"<question>(.*?)</question>", user, re.S)
+    q_words = {
+        w
+        for w in re.findall(r"[a-z]+", (question.group(1) if question else "").lower())
+        if len(w) > 3 and w not in {"which", "what", "most", "comfortable", "with", "your", "are"}
+    }
+    blocks = re.split(r"\n(?=\[\d+\] )", user)
+    for block in blocks:
+        num = re.match(r"\[(\d+)\]", block.strip())
+        for line in block.splitlines():
+            label, sep, value = line.partition(":")
+            label_words = set(re.findall(r"[a-z]+", label.lower()))
+            if sep and value.strip() and len(q_words & label_words) >= 2:
+                return json.dumps(
+                    {
+                        "answerable": True,
+                        "answer": value.strip(),
+                        "confidence": 0.92,
+                        "evidence_ids": [int(num.group(1))] if num else [],
+                    }
+                )
+    return json.dumps({"answerable": False, "answer": "", "confidence": 0.0, "evidence_ids": []})
 
 
 def _fuzzy_reply(user: str) -> str:
@@ -74,6 +114,7 @@ ESSAY_TEXT = (
 )
 
 TRUNCATE_ABOVE_CHARS = 6_500  # windows larger than this simulate finish_reason=length
+SLOW_PAGE_SECONDS = 60.0  # extraction of a page containing "SLOW-PAGE" hangs this long
 
 
 @dataclass
@@ -91,11 +132,17 @@ class FakeLLM:
         finish: str | None = "stop"
         if "extract structured opportunity" in system:
             document = messages[1].content
+            if "SLOW-PAGE" in document:
+                await asyncio.sleep(SLOW_PAGE_SECONDS)  # a model that thinks for minutes
+            if "SLOW-WINDOW" in document:
+                raise LLMHttpError(ConnectionErrorCode.TIMEOUT, "request timed out")
             if len(document) > TRUNCATE_ABOVE_CHARS:
                 # A reasoning model ran out of output tokens mid-answer.
                 text, finish = '{"opportunities": [{"title": "Cut off mid', "length"
             else:
                 text = _extraction_reply(user if len(messages) == 2 else document)
+        elif "answer ONE question from a student's application form" in system:
+            text = _evidence_reply(user)
         elif "check a student's eligibility" in system:
             text = _fuzzy_reply(user)
         elif "IN THE VOICE OF ONE SPECIFIC STUDENT" in system:
@@ -133,7 +180,9 @@ class FakeLLMFactory:
         self.http_client = httpx.AsyncClient()
         self.created: list[FakeLLM] = []
 
-    def create(self, *, base_url: str, api_key: str, model: str) -> FakeLLM:
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> FakeLLM:
         llm = FakeLLM(model=model)
         self.created.append(llm)
         return llm

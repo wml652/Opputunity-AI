@@ -44,7 +44,46 @@ class ILLMProvider(Protocol):
 
 
 class ILLMProviderFactory(Protocol):
-    def create(self, *, base_url: str, api_key: str, model: str) -> ILLMProvider: ...
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> ILLMProvider:
+        """`rpm_limit`: requests per minute shared by every call with this key (proactive
+        pacing, no 429 stalls)."""
+        ...
+
+
+class IRerankProvider(Protocol):
+    """A cross-encoder reranker the USER configured (`rerank_model`); never chosen for them."""
+
+    @property
+    def model(self) -> str: ...
+
+    async def rerank(self, query: str, passages: Sequence[str]) -> list[float]:
+        """Relevance of each passage to `query`, in [0, 1], in input order."""
+        ...
+
+
+class IRerankProviderFactory(Protocol):
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> IRerankProvider: ...
+
+
+class IVisionProvider(Protocol):
+    """A multimodal model the USER configured (`vision_model`); never chosen for them."""
+
+    @property
+    def model(self) -> str: ...
+
+    async def read_image(self, image: bytes, mime: str, instruction: str) -> str:
+        """Markdown transcription of the image (tables kept as Markdown tables)."""
+        ...
+
+
+class IVisionProviderFactory(Protocol):
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> IVisionProvider: ...
 
 
 class IEmbeddingProvider(Protocol):

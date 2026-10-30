@@ -65,6 +65,14 @@ class ProviderConfig:
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    # Optional fast model the USER typed for bulk discovery extraction. Blank = every call uses
+    # `model`. Never defaulted, guessed or substituted.
+    extraction_model: str | None = None
+    # Optional user-typed slots (blank = deterministic local fallback; never pre-filled):
+    rerank_model: str | None = None  # cross-encoder for in-page RAG (local hybrid scorer if blank)
+    rerank_base_url: str | None = None  # only if the reranker lives on another host
+    vision_model: str | None = None  # multimodal parser for image/table-only pages
+    rpm_limit: int = 36  # proactive pacing; build.nvidia.com allows 40 requests/minute
 
 
 class ConnectionErrorCode(enum.StrEnum):

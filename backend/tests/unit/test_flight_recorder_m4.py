@@ -81,6 +81,10 @@ def test_trace_records_timing_status_and_errors() -> None:
         (None, "TimeoutError: Page.goto: Timeout 25000ms", 0, "timeout"),
         (200, None, 50, "empty_content"),
         (None, "SSRF guard: blocked", 0, "ssrf_blocked"),
+        (None, "dns_error: host does not resolve", 0, "dns_error"),
+        (None, "tunnel_connect_error: upstream unreachable", 0, "tunnel_connect_error"),
+        (None, "Error: net::ERR_TUNNEL_CONNECTION_FAILED at https://x", 0, "tunnel_connect_error"),
+        (403, "bot_challenge: cloudflare interstitial", 5000, "bot_challenge"),
     ],
 )
 def test_fetch_error_codes(
@@ -94,7 +98,7 @@ def test_fetch_escalation_paths() -> None:
     slow = escalate_fetch(base, "timeout")
     assert (
         slow is not None
-        and slow.wait_until == "commit"
+        and slow.wait_until == "load"
         and slow.timeout_ms == 45_000
         and slow.level == 1
     )

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { DeadlineCell } from "@/components/discovery/outcome";
+import { VerificationDrawer } from "@/components/inbox/verification-drawer";
 import { EssayScores } from "@/components/vault/essay-synthesizer";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/field";
@@ -34,6 +35,7 @@ const SOURCE_STYLE: Record<string, string> = {
 export function ApplicationInspector({ id }: { id: string }) {
   const { data, isLoading, error } = useApplication(id);
   const start = useStartFilling();
+  const [verifying, setVerifying] = useState(false);
   if (error) return <p className="text-xs text-err">{error.message}</p>;
   if (isLoading || !data) return <p className="text-xs text-faint">Loading</p>;
   const { application: a, opportunity: o } = data;
@@ -47,6 +49,11 @@ export function ApplicationInspector({ id }: { id: string }) {
             {STARTABLE.has(a.state) ? (
               <Button size="sm" variant="primary" onClick={() => start.mutate(a.id)} disabled={start.isPending}>
                 {a.state === "BLOCKED_NEEDS_HUMAN" ? "Retry filling" : "Start filling"}
+              </Button>
+            ) : null}
+            {["AWAITING_FINAL_VERIFICATION", "SUBMIT_APPROVED", "SUBMITTING", "SUBMITTED", "SUBMISSION_FAILED"].includes(a.state) ? (
+              <Button size="sm" variant={a.state === "AWAITING_FINAL_VERIFICATION" ? "primary" : "secondary"} onClick={() => setVerifying(true)}>
+                {a.state === "AWAITING_FINAL_VERIFICATION" ? "Verify & submit" : "Submission & receipt"}
               </Button>
             ) : null}
             {data.questions.some((q) => q.status === "OPEN") ? (
@@ -108,6 +115,7 @@ export function ApplicationInspector({ id }: { id: string }) {
         </Panel>
       ) : null}
       <Checkpoints data={data} />
+      <VerificationDrawer id={verifying ? id : null} onClose={() => setVerifying(false)} />
     </div>
   );
 }
@@ -170,6 +178,11 @@ function Fields({ data }: { data: ApplicationDetailT }) {
                     <div className="line-clamp-2 break-words text-xs" title={f.value ?? undefined}>
                       {f.value ?? <span className="text-faint">{f.required ? "unanswered" : "left blank"}</span>}
                     </div>
+                    {f.evidence ? (
+                      <div className="line-clamp-2 font-mono text-[10px] text-faint" title={f.evidence}>
+                        evidence: {f.evidence}
+                      </div>
+                    ) : null}
                   </td>
                   <td className={td}>
                     <span

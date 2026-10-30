@@ -115,7 +115,7 @@ async def _page_detail(user: ApiUser, detail: dict[str, Any], suffix: str) -> di
     return data
 
 
-async def test_long_page_is_chunked_traced_and_logged(
+async def test_long_page_is_rag_filtered_traced_and_logged(
     hclient: httpx.AsyncClient, portal: Portal, infra: Infrastructure
 ) -> None:
     user = await _user(hclient)
@@ -125,9 +125,12 @@ async def test_long_page_is_chunked_traced_and_logged(
     assert page["status"] == "EXTRACTED" and page["markdown_chars"] > 14_000
     stages = [s["stage"] for s in page["trace"]]
     assert stages[:4] == ["DISCOVERY", "PREFLIGHT_AND_SSRF", "HTTP_FETCH", "DISTILL_AND_SANITIZE"]
+    # M6: the in-page RAG filter reduces the 14k-char page to one window (was >= 3 chunks).
+    rag = next(s for s in page["trace"] if s["stage"] == "RAG_FILTER")
+    assert rag["detail"]["chars_saved_pct"] > 50 and rag["detail"]["single_window"] is True
     extraction = next(s for s in page["trace"] if s["stage"] == "LLM_EXTRACTION")
-    assert extraction["status"] == "ok" and extraction["detail"]["chunked"] is True
-    assert extraction["detail"]["chunks"] >= 3 and extraction["detail"]["model"] == CHAT_MODEL
+    assert extraction["status"] == "ok" and extraction["detail"]["chunks"] == 1
+    assert extraction["detail"]["model"] == CHAT_MODEL
     assert extraction["detail"]["opportunities"] == 1
     fetch = next(s for s in page["trace"] if s["stage"] == "HTTP_FETCH")
     assert fetch["detail"]["http_status"] == 200 and fetch["detail"]["html_bytes"] > 14_000

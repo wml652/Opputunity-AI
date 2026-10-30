@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { StatusPill, type Tone } from "@/components/ui/status";
 import { cn } from "@/lib/cn";
 import { usePageDetail, useRetryPage } from "@/lib/m4-queries";
+import { useCaptureSession } from "@/lib/session-queries";
 import type { TraceStep } from "@/lib/m4-schemas";
 
 const STEP_TONE: Record<string, Tone> = { ok: "ok", fail: "err", skip: "idle" };
@@ -56,6 +57,34 @@ function TimelineStep({ step, last }: { step: TraceStep; last: boolean }) {
   );
 }
 
+/** One-line summary of the in-page RAG filter: how much of the page the model never had to read. */
+function RagSummary({ trace }: { trace: TraceStep[] }) {
+  const step = trace.find((s) => s.stage === "RAG_FILTER");
+  if (!step?.detail) return null;
+  const d = step.detail as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" ? v : null);
+  const saved = num(d.chars_saved_pct);
+  return (
+    <section className="border-b border-line px-4 py-3">
+      <h3 className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">In-page RAG filter</h3>
+      <div className="grid grid-cols-4 gap-px overflow-hidden rounded-sm border border-line bg-line font-mono text-xs">
+        {[
+          ["Sections", `${num(d.rag_sections_kept) ?? "—"} / ${num(d.rag_sections_total) ?? "—"}`],
+          ["Chars", `${num(d.chars_after)?.toLocaleString() ?? "—"} / ${num(d.chars_before)?.toLocaleString() ?? "—"}`],
+          ["Saved", saved === null ? "—" : `${saved.toFixed(1)}%`],
+          ["Window", d.single_window ? "single" : "chunked"],
+        ].map(([label, value]) => (
+          <div key={label} className="bg-surface px-2 py-1.5">
+            <div className="text-[10px] uppercase tracking-wide text-faint">{label}</div>
+            <div className="tabular">{value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-1 font-mono text-[10px] text-faint">scorer: {String(d.scorer ?? "—")}</div>
+    </section>
+  );
+}
+
 /** Flight-recorder drawer for one crawled page: discovery, preflight, fetch, distill, extraction. */
 export function CrawlInspector({
   campaignId,
@@ -68,7 +97,9 @@ export function CrawlInspector({
 }) {
   const { data: p, isLoading } = usePageDetail(campaignId, pageId);
   const retry = useRetryPage();
+  const capture = useCaptureSession();
   const failed = p ? ["FAILED", "BLOCKED_SSRF", "SKIPPED", "DISTILLED"].includes(p.status) : false;
+  const challenged = p ? p.status === "BLOCKED_BOT_CHALLENGE" || p.error_code === "bot_challenge" : false;
   return (
     <Dialog.Root open={pageId !== null} onOpenChange={(open) => !open && onClose()}>
       <Dialog.Portal>
@@ -84,7 +115,18 @@ export function CrawlInspector({
               </Dialog.Description>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              {p ? (
+              {p && challenged ? (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={capture.isPending || capture.isSuccess}
+                  onClick={() => capture.mutate({ url: p.final_url ?? p.url })}
+                  title="Opens a browser window on this computer: pass the check once, the cookies are saved encrypted for future crawls"
+                >
+                  {capture.isSuccess ? "Browser opened" : "Authenticate / Solve Challenge in Browser"}
+                </Button>
+              ) : null}
+              {p && !challenged ? (
                 <Button
                   size="sm"
                   variant={failed ? "primary" : "secondary"}
@@ -101,6 +143,8 @@ export function CrawlInspector({
             </div>
           </header>
           {retry.error ? <p className="border-b border-line bg-err-soft px-4 py-1.5 text-xs text-err">{retry.error.message}</p> : null}
+          {capture.error ? <p className="border-b border-line bg-err-soft px-4 py-1.5 text-xs text-err">{capture.error.message}</p> : null}
+          {capture.data ? <p className="border-b border-line bg-warn-soft px-4 py-1.5 text-xs text-warn">{capture.data.message}</p> : null}
           {p ? (
             <div className="flex-1 overflow-y-auto">
               <div className="grid grid-cols-4 gap-px border-b border-line bg-line">
@@ -139,6 +183,7 @@ export function CrawlInspector({
                   </div>
                 ) : null}
               </section>
+              <RagSummary trace={p.trace} />
               <section className="border-b border-line px-4 py-3">
                 <h3 className="mb-2 text-2xs font-semibold uppercase tracking-wide text-muted">Timeline</h3>
                 {p.trace.length === 0 ? (

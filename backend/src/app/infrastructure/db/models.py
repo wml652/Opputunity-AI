@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -127,6 +128,12 @@ class LLMProviderConfigRow(Base):
     api_key_last4: Mapped[str] = mapped_column(String(4), nullable=False)
     embedding_base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Optional, user-typed fast model for bulk discovery extraction (blank = use `model`).
+    extraction_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    rerank_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    rerank_base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vision_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="36")
     embedding_api_key_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     embedding_api_key_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     embedding_key_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
@@ -394,6 +401,18 @@ class CrawledPageRow(Base):
     discovery_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     strategy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
 
+    __table_args__ = (
+        Index(
+            "uq_crawled_pages_campaign_content",
+            "campaign_id",
+            "content_sha256",
+            unique=True,
+            postgresql_where=text(
+                "content_sha256 IS NOT NULL AND status IN ('DISTILLED', 'EXTRACTED')"
+            ),
+        ),
+    )
+
 
 # `opportunities.embedding` is vector(1024), written/searched via explicit SQL like memory.
 class OpportunityRow(Base):
@@ -505,6 +524,76 @@ class DomainPlaybookRow(Base):
     successes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     updated_at: Mapped[datetime] = _ts(default_now=True)
+    bot_challenge: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class SearchCredentialRow(Base):
+    __tablename__ = "search_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    key_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    key_last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    created_at: Mapped[datetime] = _ts(default_now=True)
+    updated_at: Mapped[datetime] = _ts(default_now=True)
+
+
+class BrowserSessionRow(Base):
+    __tablename__ = "browser_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    storage_state_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    storage_state_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    storage_state_key_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    tos_acknowledged_at: Mapped[datetime | None] = _ts(nullable=True)
+    last_used_at: Mapped[datetime | None] = _ts(nullable=True)
+    expires_at: Mapped[datetime | None] = _ts(nullable=True)
+    daily_action_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actions_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    actions_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[datetime] = _ts(default_now=True)
+
+
+class FinalVerificationRow(Base):
+    __tablename__ = "final_verifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False
+    )
+    checkpoint_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("application_checkpoints.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    preview_hash_seen: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_preview_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    observed_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    edited_fields: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    mismatches: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    approved_at: Mapped[datetime | None] = _ts(nullable=True)
+    rejected_at: Mapped[datetime | None] = _ts(nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime | None] = _ts(nullable=True)
+    final_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    receipt_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    receipt_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt_key_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    receipt_text_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt_text_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt_text_key_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    created_at: Mapped[datetime] = _ts(default_now=True)
 
 
 class ApplicationCheckpointRow(Base):
@@ -555,6 +644,7 @@ class ApplicationFieldRow(Base):
     essay_draft_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     user_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     updated_at: Mapped[datetime] = _ts(default_now=True)
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("application_id", "field_key", name="uq_application_fields_key"),
@@ -658,6 +748,7 @@ TENANT_TABLES = (
     "documents",
     "reference_essays",
     "essay_chunks",
+    "document_chunks",
     "style_fingerprints",
     "knowledge_memory_qa",
     "campaigns",
@@ -675,4 +766,6 @@ TENANT_TABLES = (
     "notification_channels",
     "notifications",
     "browser_sessions",
+    "search_credentials",
+    "final_verifications",
 )

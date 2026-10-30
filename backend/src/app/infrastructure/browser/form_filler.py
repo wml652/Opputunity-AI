@@ -33,6 +33,13 @@ from app.domain.applications.filling import (
     UnresolvedField,
     dom_fingerprint,
 )
+from app.domain.applications.verification import (
+    PreviewValue,
+    SubmitOutcome,
+    SubmitOutcomeKind,
+    compute_preview_hash,
+    normalize_value,
+)
 from app.domain.ports.applications import Resolver
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.egress_proxy import EgressProxy
@@ -279,6 +286,183 @@ class PlaywrightFormFiller:
             error=f"more than {MAX_STEPS} steps; stopping for safety",
         )
 
+    # -- final submission (only after a recorded human OK) ---------------------------------------
+
+    async def submit(
+        self,
+        portal_url: str,
+        *,
+        approved: dict[str, FieldResolution],
+        approved_hash: str,
+        storage_state: str | None,
+        documents: dict[uuid.UUID, DocumentBlob],
+    ) -> SubmitOutcome:
+        """Replay from step 1 with the APPROVED values (so edits to earlier steps are applied),
+        read every control back from the page, and click Submit only if the hash of what the
+        page shows equals `approved_hash`. Otherwise nothing is submitted."""
+        await self._guard.validate(portal_url)
+        from playwright.async_api import async_playwright
+
+        proxy = EgressProxy(self._guard)
+        port = await proxy.start()
+        log_lines: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="ootg-submit-") as tmp:
+            paths = _write_documents(documents, Path(tmp))
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=self._headless,
+                proxy={"server": f"http://127.0.0.1:{port}", "bypass": "<-loopback>"},
+                args=["--proxy-bypass-list=<-loopback>"],
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent=USER_AGENT,
+                    locale="en-US",
+                    viewport={"width": 1280, "height": 900},
+                    accept_downloads=False,
+                    storage_state=json.loads(storage_state) if storage_state else None,
+                )
+                page = await context.new_page()
+                page.set_default_timeout(NAV_TIMEOUT_MS)
+                return await self._submit_drive(
+                    page, portal_url, approved, approved_hash, paths, log_lines
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    await browser.close()
+                with contextlib.suppress(Exception):
+                    await pw.stop()
+                await proxy.stop()
+
+    async def _submit_drive(
+        self,
+        page: Any,
+        portal_url: str,
+        approved: dict[str, FieldResolution],
+        approved_hash: str,
+        paths: dict[uuid.UUID, str],
+        log_lines: list[str],
+    ) -> SubmitOutcome:
+        await page.goto(portal_url, wait_until="domcontentloaded")
+        observed: list[PreviewValue] = []
+        seen: set[str] = set()
+        for step_index in range(MAX_STEPS):
+            html = await page.content()
+            if CAPTCHA_RE.search(html):
+                return SubmitOutcome(
+                    SubmitOutcomeKind.BLOCKED,
+                    error="the portal shows a CAPTCHA; a human must submit",
+                    log=log_lines,
+                )
+            fields = await _scan(page)
+            buttons = await page.evaluate(BUTTONS_JS)
+            mismatches: list[dict[str, str]] = []
+            for f in fields:
+                res = approved.get(f.key)
+                if res is None or res.value is None:
+                    if f.required:
+                        mismatches.append(
+                            {"field": f.key, "expected": "(no approved value)", "observed": ""}
+                        )
+                        continue
+                    # Optional and left blank in the approved preview: part of the hash, too.
+                    shown_blank = await _read_back(page, f, "")
+                    if normalize_value(shown_blank):
+                        mismatches.append({"field": f.key, "expected": "", "observed": shown_blank})
+                        continue
+                    observed.append(PreviewValue(step_index, f.key, None))
+                    continue
+                try:
+                    await _fill(page, f, res, paths)
+                except Exception as exc:  # noqa: BLE001 - reported as a mismatch, never submitted
+                    mismatches.append(
+                        {"field": f.key, "expected": res.value, "observed": type(exc).__name__}
+                    )
+                    continue
+                shown = await _read_back(page, f, res.value)
+                if normalize_value(shown) != normalize_value(res.value):
+                    mismatches.append({"field": f.key, "expected": res.value, "observed": shown})
+                    continue
+                observed.append(PreviewValue(step_index, f.key, res.value))
+                seen.add(f.key)
+            if mismatches:
+                log_lines.append(f"step {step_index + 1}: {len(mismatches)} value(s) differ")
+                return SubmitOutcome(
+                    SubmitOutcomeKind.MISMATCH,
+                    mismatches=mismatches,
+                    error="the page does not show the approved values",
+                    log=log_lines,
+                )
+            next_btn = next((b for b in buttons if NEXT_RE.search(b["text"])), None)
+            submit_btn = next((b for b in buttons if SUBMIT_RE.search(b["text"])), None)
+            if next_btn is not None:
+                with contextlib.suppress(Exception):
+                    async with page.expect_navigation(
+                        wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS
+                    ):
+                        await page.click(f'[data-ootg-btn="{next_btn["i"]}"]')
+                log_lines.append(f"step {step_index + 1} verified")
+                continue
+            if submit_btn is None:
+                return SubmitOutcome(
+                    SubmitOutcomeKind.BLOCKED,
+                    error="no Next or Submit button on this step",
+                    log=log_lines,
+                )
+            missing = sorted(set(approved) - seen)
+            if missing:
+                return SubmitOutcome(
+                    SubmitOutcomeKind.MISMATCH,
+                    mismatches=[
+                        {
+                            "field": k,
+                            "expected": approved[k].value or "",
+                            "observed": "(not on page)",
+                        }
+                        for k in missing
+                    ],
+                    error="approved fields were not found on the portal",
+                    log=log_lines,
+                )
+            observed_hash = compute_preview_hash(
+                PreviewValue(v.step_index, v.field_key, v.value) for v in observed
+            )
+            # Steps may be re-numbered by the portal; compare on (key, value) like the approval.
+            if observed_hash != approved_hash and _hash_by_key(observed) != _hash_by_key_map(
+                approved
+            ):
+                return SubmitOutcome(
+                    SubmitOutcomeKind.MISMATCH,
+                    observed_hash=observed_hash,
+                    error="observed values do not match the approved preview hash",
+                    log=log_lines,
+                )
+            log_lines.append(
+                f"all {len(observed)} values verified; clicking '{submit_btn['text']}'"
+            )
+            with contextlib.suppress(Exception):
+                async with page.expect_navigation(
+                    wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS
+                ):
+                    await page.click(f'[data-ootg-btn="{submit_btn["i"]}"]')
+            receipt_png: bytes | None = None
+            with contextlib.suppress(Exception):
+                receipt_png = await page.screenshot(full_page=True, type="png")
+            text = ""
+            with contextlib.suppress(Exception):
+                text = " ".join((await page.inner_text("body")).split())[:4000]
+            return SubmitOutcome(
+                SubmitOutcomeKind.SUBMITTED,
+                observed_hash=observed_hash,
+                receipt_png=receipt_png,
+                receipt_text=text,
+                final_url=page.url,
+                log=log_lines,
+            )
+        return SubmitOutcome(
+            SubmitOutcomeKind.BLOCKED, error=f"more than {MAX_STEPS} steps", log=log_lines
+        )
+
     async def _outcome(
         self,
         kind: FillOutcomeKind,
@@ -336,6 +520,57 @@ async def _scan(page: Any) -> list[FormField]:
         )
         for r in raw
     ]
+
+
+READ_JS = r"""
+([name, type]) => {
+  const els = [...document.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
+  const el = els[0];
+  if (!el) return null;
+  if (type === 'select') { const o = el.options[el.selectedIndex]; return o ? JSON.stringify([o.text.trim(), o.value]) : ''; }
+  if (type === 'radio') {
+    const r = els.find((x) => x.checked); if (!r) return '';
+    const label = (r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`)?.innerText.trim()) || r.closest('label')?.innerText.trim() || r.value;
+    return JSON.stringify([label, r.value]);
+  }
+  if (type === 'checkbox') return el.checked ? 'on' : '';
+  if (type === 'file') return el.files && el.files.length ? el.files[0].name : '';
+  return el.value;
+}
+"""
+
+
+async def _read_back(page: Any, f: FormField, expected: str) -> str:
+    """What the page REALLY shows for this control, mapped onto the approved representation
+    (select/radio: the option label or value; checkbox: truthiness; file: a file is attached)."""
+    raw = await page.evaluate(READ_JS, [f.key, f.field_type])
+    if raw is None:
+        return "(missing)"
+    if f.field_type in ("select", "radio"):
+        if not raw:
+            return ""
+        label, value = json.loads(raw)
+        wanted = normalize_value(expected).lower()
+        return expected if wanted in (normalize_value(label).lower(), value.lower()) else label
+    if f.field_type == "checkbox":
+        want_on = expected.strip().lower() in TRUTHY
+        return expected if (raw == "on") == want_on else raw
+    if f.field_type == "file":
+        return expected if raw else ""
+    return str(raw)
+
+
+def _hash_by_key(values: list[PreviewValue]) -> str:
+    """Step-independent comparison (a portal may renumber steps): non-empty values only."""
+    return compute_preview_hash(
+        PreviewValue(0, v.field_key, v.value) for v in values if normalize_value(v.value)
+    )
+
+
+def _hash_by_key_map(approved: dict[str, FieldResolution]) -> str:
+    return compute_preview_hash(
+        PreviewValue(0, k, r.value) for k, r in approved.items() if normalize_value(r.value)
+    )
 
 
 async def _fill(page: Any, f: FormField, res: FieldResolution, paths: dict[uuid.UUID, str]) -> None:

@@ -16,6 +16,8 @@ import {
 } from "@/lib/queries";
 import type { ProviderKind } from "@/lib/schemas";
 
+import { EMPTY_SLOTS, ModelSlotFields, parseRpm, type SlotValues } from "./model-slots";
+
 interface Props {
   onDone: () => void;
   onCancel?: () => void;
@@ -41,7 +43,10 @@ export function ProviderForm({ onDone, onCancel }: Props) {
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
   const [embeddingModel, setEmbeddingModel] = useState("");
+  const [extractionModel, setExtractionModel] = useState("");
   const [showEmbedding, setShowEmbedding] = useState(false);
+  const [slots, setSlots] = useState<SlotValues>(EMPTY_SLOTS);
+  const [showSlots, setShowSlots] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const preset = presets?.find((p) => p.kind === kind);
   const isCustom = kind === "CUSTOM";
@@ -73,6 +78,8 @@ export function ProviderForm({ onDone, onCancel }: Props) {
     const form = new FormData(formEl);
     if (!apiKey.trim()) return setError("API key is required");
     if (!model.trim()) return setError("Chat model is required: type it or load it from the API");
+    const rpm = parseRpm(slots.rpm);
+    if (rpm === null) return setError("Requests per minute must be a whole number from 1 to 10000");
     const body: ProviderInput = {
       kind,
       label: optional(form.get("label")),
@@ -81,6 +88,11 @@ export function ProviderForm({ onDone, onCancel }: Props) {
       api_key: apiKey.trim(),
       embedding_base_url: optional(form.get("embedding_base_url")),
       embedding_model: embeddingModel.trim() || undefined,
+      extraction_model: extractionModel.trim() || undefined,
+      rerank_model: slots.rerankModel.trim() || undefined,
+      rerank_base_url: slots.rerankBaseUrl.trim() || undefined,
+      vision_model: slots.visionModel.trim() || undefined,
+      rpm_limit: rpm,
       embedding_api_key: optional(form.get("embedding_api_key")),
       activate: true,
     };
@@ -88,6 +100,7 @@ export function ProviderForm({ onDone, onCancel }: Props) {
     try {
       const created = await create.mutateAsync(body);
       formEl.reset();
+      setSlots(EMPTY_SLOTS);
       verify.mutate(created.id); // immediate live handshake with the exact saved model
       onDone();
     } catch (err) {
@@ -169,6 +182,22 @@ export function ProviderForm({ onDone, onCancel }: Props) {
           </div>
         </Field>
 
+        <Field
+          id="extraction_model"
+          label="Fast Extraction Model (Optional)"
+          className="col-span-2"
+          hint="Blank = discovery extraction uses the chat model above. If you enter a faster model id from your provider, it reads crawled pages; eligibility and essays keep the chat model."
+        >
+          <Input
+            id="extraction_model"
+            list="provider-models"
+            value={extractionModel}
+            onChange={(e) => setExtractionModel(e.target.value)}
+            placeholder="optional: exact model id"
+            className="font-mono text-xs"
+          />
+        </Field>
+
         <div className="col-span-2 border-t border-line pt-2">
           <button
             type="button"
@@ -221,6 +250,21 @@ export function ProviderForm({ onDone, onCancel }: Props) {
             </Field>
           </>
         ) : null}
+
+        <div className="col-span-2 border-t border-line pt-2">
+          <button
+            type="button"
+            className="text-xs text-muted hover:text-fg"
+            onClick={() => setShowSlots((v) => !v)}
+          >
+            {showSlots ? "Hide" : "Show"} rerank, vision and pacing
+          </button>
+          <span className="ml-2 font-mono text-2xs text-faint">
+            {slots.rerankModel.trim() || "blank rerank = local hybrid scorer"} ·{" "}
+            {slots.visionModel.trim() || "blank vision = text/PDF only"} · {slots.rpm || "?"} rpm
+          </span>
+        </div>
+        {showSlots ? <ModelSlotFields values={slots} onChange={setSlots} /> : null}
 
         {error ? (
           <p className="col-span-2 rounded-sm border border-err/30 bg-err-soft px-2 py-1 text-xs text-err">

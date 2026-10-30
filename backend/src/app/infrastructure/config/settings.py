@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     )
 
     environment: Literal["development", "test", "production"] = "development"
+    # Local runtime only: opens a VISIBLE browser so the user can pass a bot challenge or sign
+    # in to LinkedIn themselves (cookies are then stored encrypted). Never in production.
+    allow_headful_capture: bool = True
+    # Lease reaper + deadline sweep cadence (in-process runner).
+    maintenance_interval_seconds: float = 300.0
+    # Browser filling runs in parallel (batch auto-stage); each is a Chromium instance.
+    max_parallel_fills: int = 2
     log_level: str = "INFO"
     log_json: bool = False
 
@@ -39,7 +46,10 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
     # Outbound / LLM
-    llm_timeout_seconds: float = 60.0
+    # Reasoning models (e.g. long-thinking NIM models) need minutes for one extraction window.
+    llm_timeout_seconds: float = 180.0
+    # Retries per chat call on timeout/429/5xx. Kept low: wall-clock = timeout x (retries + 1).
+    llm_max_retries: int = 1
     llm_allow_private_hosts: bool = False  # allow custom base URLs on localhost/LAN (self-hosted)
     llm_allow_insecure_http: bool = False
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -10,6 +12,7 @@ from app.bootstrap.container import (
     Infrastructure,
     build_api_container,
     build_infrastructure,
+    build_maintenance,
     build_relay,
     build_sweep,
 )
@@ -37,21 +40,42 @@ def create_app_with(
                 poll_interval=settings.outbox_poll_interval_seconds,
             )
             relay_loop.start()
+        maintenance: asyncio.Task[None] | None = None
         if settings.campaign_runner == "inprocess" and run_sweep:
             interrupted = await build_sweep(infra).execute()
             if interrupted:
                 log.warning("campaigns.interrupted_marked_failed", count=interrupted)
+            maintenance = asyncio.create_task(_maintenance_loop(infra))
         log.info("api.started", environment=settings.environment, outbox_relay=relay_enabled)
         if settings.dev_auth_bypass:
             log.warning("api.dev_auth_bypass_enabled", detail="login is disabled (DEV ONLY)")
         try:
             yield
         finally:
+            if maintenance is not None:
+                maintenance.cancel()
+                with contextlib.suppress(BaseException):
+                    await maintenance
             if relay_loop is not None:
                 await relay_loop.stop()
             await infra.aclose()
 
     return build_api(build_api_container(infra), lifespan=lifespan)
+
+
+async def _maintenance_loop(infra: Infrastructure) -> None:
+    """In-process mode: lease reaper + deadline sweep at startup, then every few minutes.
+    (With CAMPAIGN_RUNNER=arq the worker runs the same jobs as cron tasks.)"""
+    reaper, deadlines = build_maintenance(infra)
+    while True:
+        try:
+            reaped = await reaper.execute()
+            expired = await deadlines.execute()
+            if reaped or expired:
+                log.info("applications.maintenance", reaped=reaped, expired=expired)
+        except Exception:
+            log.exception("applications.maintenance_failed")
+        await asyncio.sleep(infra.settings.maintenance_interval_seconds)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

@@ -16,11 +16,12 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.domain.applications.filling import FieldResolution, FieldSource, FormField
 from app.domain.essay.synthesis import EssayDraft
 from app.domain.memory.models import AUTO_FILL_THRESHOLD, RecallResult
+from app.domain.profile.evidence import EvidenceAnswer
 from app.domain.shared.enums import DocKind
 
 PROFILE_CONFIDENCE = 0.97
@@ -168,6 +169,13 @@ class DocumentRef:
 
 Recall = Callable[[str], Awaitable[RecallResult]]
 EssayWriter = Callable[[FormField], Awaitable[EssayDraft | None]]
+# (field, close past answers as (question, answer, similarity)) -> grounded evidence answer
+EvidenceLookup = Callable[[FormField, list[tuple[str, str, float]]], Awaitable[EvidenceAnswer]]
+_EVIDENCE_SOURCE = {
+    "DOCUMENT": FieldSource.DOCUMENT,
+    "ESSAY": FieldSource.ESSAY,
+    "MEMORY": FieldSource.MEMORY,
+}
 
 
 @dataclass
@@ -177,6 +185,7 @@ class FieldMapper:
     recall: Recall
     essay: EssayWriter
     known: dict[str, FieldResolution] = field(default_factory=dict)
+    evidence: EvidenceLookup | None = None  # unified CV / transcript / essay / memory RAG
 
     async def resolve(self, f: FormField) -> FieldResolution:
         # 0. settled values (the student's answers, or values from earlier runs) win.
@@ -240,16 +249,51 @@ class FieldMapper:
                     memory_qa_id=best.qa.id,
                     note=f"recalled: {best.qa.question_text[:80]}",
                 )
-            return FieldResolution(
+        miss = (
+            FieldResolution(
                 f.key,
                 None,
                 FieldSource.NONE,
-                similarity,
+                best.confidence.value,
                 memory_qa_id=best.qa.id,
-                suggestion=answer,
+                suggestion=best.qa.answer_text,
                 note="memory match below threshold",
             )
-        return FieldResolution(f.key, None, FieldSource.NONE, 0.0, note="no source can answer this")
+            if best is not None
+            else FieldResolution(
+                f.key, None, FieldSource.NONE, 0.0, note="no source can answer this"
+            )
+        )
+
+        # 5. personal evidence RAG (CV / transcript / essays / past answers), required fields only:
+        #    this is the last stop before the question pauses the application.
+        if self.evidence is None or not f.required:
+            return miss
+        memory = [
+            (m.qa.question_text, m.qa.answer_text, m.confidence.value) for m in result.matches[:3]
+        ]
+        found = await self.evidence(f, memory)
+        if found.answer is None:
+            return miss
+        value = match_option(found.answer, f.options)
+        if found.usable and value is not None:
+            if f.max_length:
+                value = value[: f.max_length]
+            return FieldResolution(
+                f.key,
+                value,
+                _EVIDENCE_SOURCE.get(found.source or "", FieldSource.DOCUMENT),
+                found.confidence,
+                note=f"evidence ({found.reason})",
+                evidence=found.snippet,
+            )
+        return replace(
+            miss,
+            confidence=max(miss.confidence, found.confidence),
+            suggestion=found.answer,
+            evidence=found.snippet,
+            note=f"evidence below threshold ({found.reason})",
+        )
 
     def _document(self, f: FormField) -> FieldResolution:
         label = normalize_label(f"{f.label} {f.key}")

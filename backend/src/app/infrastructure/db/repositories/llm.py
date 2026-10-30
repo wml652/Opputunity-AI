@@ -38,6 +38,11 @@ def _config(row: LLMProviderConfigRow) -> ProviderConfig:
         is_active=row.is_active,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        extraction_model=row.extraction_model,
+        rerank_model=row.rerank_model,
+        rerank_base_url=row.rerank_base_url,
+        vision_model=row.vision_model,
+        rpm_limit=row.rpm_limit,
     )
 
 
@@ -54,6 +59,11 @@ def _columns(config: ProviderConfig) -> dict[str, object]:
         "api_key_last4": config.api_key_last4,
         "embedding_base_url": config.embedding_base_url,
         "embedding_model": config.embedding_model,
+        "extraction_model": config.extraction_model,
+        "rerank_model": config.rerank_model,
+        "rerank_base_url": config.rerank_base_url,
+        "vision_model": config.vision_model,
+        "rpm_limit": config.rpm_limit,
         "embedding_api_key_ciphertext": emb.ciphertext if emb else None,
         "embedding_api_key_nonce": emb.nonce if emb else None,
         "embedding_key_version": emb.key_version if emb else None,

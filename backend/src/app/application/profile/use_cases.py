@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
 
+from app.application.profile.indexing import IndexDocument
 from app.application.vault_deps import VaultDeps
 from app.domain.events.models import NewEvent
 from app.domain.llm.provider import EncryptedSecret
@@ -26,7 +28,7 @@ from app.domain.profile.models import (
     clean_skills,
 )
 from app.domain.shared.enums import Actor, DocKind
-from app.domain.shared.errors import ConflictError, NotFoundError, ValidationError
+from app.domain.shared.errors import ConflictError, DomainError, NotFoundError, ValidationError
 from app.domain.shared.ids import new_uuid7
 
 PROFILE_TABLE = "student_profiles"
@@ -250,6 +252,11 @@ class UploadDocument:
         except BaseException:
             await self.deps.storage.delete(document.storage_key)
             raise
+        if text:
+            # Evidence RAG index (best effort: a failure here never fails the upload; the
+            # backfill indexes it before the next retrieval).
+            with contextlib.suppress(DomainError):
+                await IndexDocument(self.deps).execute(user_id, row_id)
         return document
 
 

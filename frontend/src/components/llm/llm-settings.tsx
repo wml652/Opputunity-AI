@@ -15,6 +15,7 @@ import {
 } from "@/lib/queries";
 import type { ConnectionCheck, ProviderConfig } from "@/lib/schemas";
 
+import { ProviderSlotsEditor } from "./model-slots";
 import { PromptTest } from "./prompt-test";
 import { ProviderForm } from "./provider-form";
 
@@ -40,6 +41,7 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
   const activate = useActivateProvider();
   const remove = useDeleteProvider();
   const error = verify.error ?? activate.error ?? remove.error;
+  const [editing, setEditing] = useState(false);
 
   return (
     <>
@@ -56,7 +58,18 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
           <div className="font-mono text-2xs text-faint">{provider.base_url}</div>
         </td>
         <td className={cn(td, "text-xs text-muted")}>{KIND_LABEL[provider.kind]}</td>
-        <td className={cn(td, "font-mono text-2xs")}>{provider.model}</td>
+        <td className={cn(td, "font-mono text-2xs")}>
+          {provider.model}
+          {provider.extraction_model ? (
+            <div className="text-faint" title="Fast extraction model (discovery only)">
+              extraction: {provider.extraction_model}
+            </div>
+          ) : null}
+          <div className="text-faint" title="Optional rerank / vision slots and request pacing">
+            rerank: {provider.rerank_model ?? "local hybrid"} · vision: {provider.vision_model ?? "off"} ·{" "}
+            <span className="tabular">{provider.rpm_limit ?? 36}</span> rpm
+          </div>
+        </td>
         <td className={cn(td, "font-mono text-2xs text-muted")}>
           ••••{provider.api_key_last4}
         </td>
@@ -76,6 +89,9 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
           <div className="flex justify-end gap-1">
             <Button size="sm" onClick={() => verify.mutate(provider.id)} disabled={verify.isPending}>
               Verify
+            </Button>
+            <Button size="sm" onClick={() => setEditing((v) => !v)}>
+              Slots
             </Button>
             {!provider.is_active ? (
               <Button size="sm" onClick={() => activate.mutate(provider.id)} disabled={activate.isPending}>
@@ -97,6 +113,13 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
           </div>
         </td>
       </tr>
+      {editing ? (
+        <tr>
+          <td colSpan={7} className="border-b border-line bg-surface-2">
+            <ProviderSlotsEditor provider={provider} onDone={() => setEditing(false)} />
+          </td>
+        </tr>
+      ) : null}
       {provider.last_check && !provider.last_check.ok && provider.last_check.error_message ? (
         <tr>
           <td colSpan={7} className="border-b border-line bg-err-soft px-3 py-1 font-mono text-2xs text-err">

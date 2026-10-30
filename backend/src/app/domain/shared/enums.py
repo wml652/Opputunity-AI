@@ -36,6 +36,7 @@ class CrawlStatus(enum.StrEnum):
     BLOCKED_SSRF = "BLOCKED_SSRF"
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"  # not fetched: a past campaign proved the URL dead (failure memory)
+    BLOCKED_BOT_CHALLENGE = "BLOCKED_BOT_CHALLENGE"  # Cloudflare-style interstitial challenge
 
 
 class OpportunityType(enum.StrEnum):

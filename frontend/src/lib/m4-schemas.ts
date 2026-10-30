@@ -56,6 +56,8 @@ export const fieldSchema = z.object({
   confidence: z.number(),
   essay_draft_id: z.string().nullable(),
   user_edited: z.boolean(),
+  // PII-redacted CV / essay / memory snippet that grounded an auto-filled answer.
+  evidence: z.string().nullable().optional(),
 });
 export type FieldT = z.infer<typeof fieldSchema>;
 
@@ -171,3 +173,36 @@ export const deliverySchema = z.object({
   provider: z.string().nullable(),
   error: z.string().nullable(),
 });
+
+// ---- Final verification gate (M5) -------------------------------------------------------------
+
+export const verificationRecordSchema = z.object({
+  id: z.string(),
+  outcome: z.string(),
+  preview_hash_seen: z.string(),
+  approved_preview_hash: z.string().nullable(),
+  observed_hash: z.string().nullable(),
+  edited_fields: z.array(z.string()),
+  mismatches: z.array(z.record(z.string())),
+  approved_at: z.string().nullable(),
+  rejected_at: z.string().nullable(),
+  reject_reason: z.string().nullable(),
+  submitted_at: z.string().nullable(),
+  final_url: z.string().nullable(),
+  error: z.string().nullable(),
+  has_receipt: z.boolean(),
+  created_at: z.string(),
+});
+export type VerificationRecordT = z.infer<typeof verificationRecordSchema>;
+
+export const verificationSchema = z.object({
+  application: applicationSchema,
+  opportunity: opportunitySchema,
+  fields: z.array(fieldSchema),
+  drafts: z.array(draftSchema),
+  checkpoint: checkpointSchema.nullable(),
+  preview_hash: z.string(),
+  latest: verificationRecordSchema.nullable(),
+  receipt_text: z.string().nullable(),
+});
+export type VerificationT = z.infer<typeof verificationSchema>;

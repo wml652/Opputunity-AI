@@ -21,14 +21,23 @@ _SECURITY_HEADERS = {
     "x-frame-options": "DENY",
     "referrer-policy": "strict-origin-when-cross-origin",
     "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-site",
+    "x-permitted-cross-domain-policies": "none",
+    "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
 }
+# The API serves JSON, images and SSE only: nothing may execute or be framed. (The interactive
+# docs, dev only, need their own scripts and are exempt.)
+API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+HSTS = "max-age=63072000; includeSubDomains"
 
 
 class RequestContextMiddleware:
-    """Adds `X-Request-ID` and baseline security headers to every response."""
+    """Adds `X-Request-ID` and security headers (CSP, framing, sniffing, permissions, HSTS when
+    served over HTTPS) to every response."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, hsts: bool = False) -> None:
         self.app = app
+        self.hsts = hsts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -37,6 +46,7 @@ class RequestContextMiddleware:
         incoming = Headers(scope=scope).get("x-request-id", "")
         request_id = incoming if 0 < len(incoming) <= 64 else uuid.uuid4().hex
         scope.setdefault("state", {})["request_id"] = request_id
+        is_docs = str(scope.get("path", "")).startswith(("/api/docs", "/api/openapi"))
 
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -44,6 +54,10 @@ class RequestContextMiddleware:
                 headers["x-request-id"] = request_id
                 for name, value in _SECURITY_HEADERS.items():
                     headers.setdefault(name, value)
+                if not is_docs:
+                    headers.setdefault("content-security-policy", API_CSP)
+                if self.hsts:
+                    headers.setdefault("strict-transport-security", HSTS)
             await send(message)
 
         await self.app(scope, receive, send_wrapper)

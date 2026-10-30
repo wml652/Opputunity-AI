@@ -18,7 +18,8 @@ TRANSITIONS: dict[ApplicationState, frozenset[ApplicationState]] = {
     S.ELIGIBILITY_PENDING: frozenset({S.ELIGIBLE, S.INELIGIBLE, S.EXPIRED}),
     S.ELIGIBLE: frozenset({S.QUEUED}),
     S.QUEUED: frozenset({S.PREPARING}),
-    S.PREPARING: frozenset({S.FILLING}),
+    # BLOCKED_NEEDS_HUMAN from PREPARING: the lease reaper found a worker that died mid-run.
+    S.PREPARING: frozenset({S.FILLING, S.BLOCKED_NEEDS_HUMAN}),
     S.FILLING: frozenset(
         {S.PAUSED_NEEDS_USER_INPUT, S.BLOCKED_NEEDS_HUMAN, S.AWAITING_FINAL_VERIFICATION}
     ),
@@ -27,7 +28,9 @@ TRANSITIONS: dict[ApplicationState, frozenset[ApplicationState]] = {
     S.RESUME_QUEUED: frozenset({S.FILLING}),
     S.AWAITING_FINAL_VERIFICATION: frozenset({S.SUBMIT_APPROVED, S.RESUME_QUEUED}),
     S.SUBMIT_APPROVED: frozenset({S.SUBMITTING}),
-    S.SUBMITTING: frozenset({S.SUBMITTED, S.SUBMISSION_FAILED}),
+    # Back to AWAITING_FINAL_VERIFICATION when the page values differ from the approved ones:
+    # the application is re-staged for review instead of being submitted.
+    S.SUBMITTING: frozenset({S.SUBMITTED, S.SUBMISSION_FAILED, S.AWAITING_FINAL_VERIFICATION}),
     S.SUBMISSION_FAILED: frozenset({S.RESUME_QUEUED}),
 }
 # Any non-terminal state may be expired by the deadline sweep, cancelled by the user, or failed.

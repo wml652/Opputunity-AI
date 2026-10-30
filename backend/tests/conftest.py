@@ -33,6 +33,11 @@ from app.infrastructure.runtime.event_loop import configure_event_loop
 configure_event_loop()
 # pgserver logs from an atexit hook after pytest has closed the captured streams.
 logging.raiseExceptions = False
+# Safety net: any Settings() built anywhere during tests (even without the `settings` fixture)
+# writes logs/storage under a throwaway directory, never into the developer's real `.logs/`.
+_TEST_SCRATCH = tempfile.mkdtemp(prefix="ootg-test-")
+os.environ["LOGS_DIR"] = os.path.join(_TEST_SCRATCH, "logs")
+os.environ["STORAGE_DIR"] = os.path.join(_TEST_SCRATCH, "storage")
 
 from app.bootstrap.app import create_app_with  # noqa: E402
 from app.bootstrap.container import Infrastructure, build_infrastructure  # noqa: E402

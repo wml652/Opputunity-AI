@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from app.application.essay.synthesis import EssayRequest, SynthesizeEssay
 from app.application.memory.use_cases import LearnAnswer, RecallMemory, UpdateMemory
 from app.application.notifications.use_cases import NotifyUser
 from app.application.profile.use_cases import DownloadDocument, GetProfile
+from app.application.services.evidence import ProfileEvidenceRetriever
 from app.application.services.field_mapper import DocumentRef, FieldMapper
 from app.domain.applications.filling import (
     ApplicationField,
@@ -43,12 +45,29 @@ from app.domain.ports.applications import (
 from app.domain.ports.crypto import ICipher, aad
 from app.domain.ports.uow import IUnitOfWork, IUnitOfWorkFactory
 from app.domain.ports.vault import IObjectStorage
+from app.domain.profile.evidence import EvidenceAnswer
 from app.domain.shared.clock import Clock
 from app.domain.shared.enums import Actor, ApplicationState, QuestionStatus
 from app.domain.shared.errors import ConflictError, DomainError, NotFoundError, ValidationError
 from app.domain.shared.ids import new_uuid7
 
 S = ApplicationState
+FILL_LEASE = timedelta(minutes=30)
+MAX_BATCH = 25
+# Profile facts that are PII: redacted from every evidence snippet before a model sees it.
+PII_FACT_KEYS = frozenset(
+    {
+        "full_name",
+        "first_name",
+        "last_name",
+        "email",
+        "home_address",
+        "phone",
+        "date_of_birth",
+        "national_id",
+        "passport_number",
+    }
+)
 FIELDS_TABLE = "application_fields"
 CHECKPOINT_TABLE = "application_checkpoints"
 
@@ -67,6 +86,7 @@ class ApplicationDeps:
     update_memory: UpdateMemory
     essays: SynthesizeEssay
     notify: NotifyUser
+    evidence: ProfileEvidenceRetriever | None = None  # CV / transcript / essay evidence RAG
 
 
 async def _transition(
@@ -156,7 +176,19 @@ class RunApplication:
                 )
             elif app.state is not S.FILLING:
                 return None
+            # Worker lease: the reaper hands the run back to the user if this process dies.
+            await uow.app_details.set_lease(user_id, app.id, "in-process", now + FILL_LEASE)
             await uow.commit()
+        try:
+            return await self._run(user_id, app, opp)
+        finally:
+            async with self.deps.uow_factory(user_id) as uow:
+                await uow.app_details.set_lease(user_id, app.id, None, None)
+                await uow.commit()
+
+    async def _run(
+        self, user_id: uuid.UUID, app: Application, opp: Opportunity
+    ) -> FillOutcomeKind | None:
         if not opp.portal_url:
             await self._finish_blocked(
                 user_id, app, opp, "the opportunity has no application portal URL"
@@ -228,12 +260,21 @@ class RunApplication:
             except DomainError:
                 return None
 
+        pii_values = [v for k, v in facts.items() if k in PII_FACT_KEYS and v]
+
+        async def evidence(f: FormField, memory: list[tuple[str, str, float]]) -> EvidenceAnswer:
+            assert self.deps.evidence is not None
+            return await self.deps.evidence.answer(
+                user_id, f.label, options=f.options, pii_values=pii_values, memory=memory
+            )
+
         mapper = FieldMapper(
             facts=facts,
             documents=[DocumentRef(d.id, d.kind, d.filename) for d in documents],
             recall=recall,
             essay=essay,
             known=known,
+            evidence=evidence if self.deps.evidence is not None else None,
         )
 
         async def resolver(step_index: int, fields: list[FormField]) -> list[FieldResolution]:
@@ -265,6 +306,7 @@ class RunApplication:
                         essay_draft_id=res.essay_draft_id,
                         user_edited=keep_user,
                         updated_at=self.deps.clock.now(),
+                        evidence=res.evidence,
                     )
                     secret = (
                         self.deps.cipher.encrypt(res.value.encode(), _field_aad(user_id, row_id))
@@ -513,6 +555,35 @@ class StartFilling:
             elif app.state not in (S.QUEUED, S.RESUME_QUEUED):
                 raise ValidationError(f"cannot start filling from state {app.state.value}")
         await self.runner.start(user_id, application_id)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    started: list[uuid.UUID]
+    skipped_no_portal: int
+
+
+@dataclass(slots=True)
+class BatchPrepare:
+    """ "Auto-Stage Eligible Queue": fill the top-N QUEUED applications (closest deadline first)
+    up to AWAITING_FINAL_VERIFICATION or PAUSED_NEEDS_USER_INPUT. NEVER submits: every one of
+    them still needs the human "OK - Verify & Submit"."""
+
+    uow_factory: IUnitOfWorkFactory
+    runner: IApplicationRunner
+
+    async def execute(self, user_id: uuid.UUID, limit: int = 5) -> BatchResult:
+        if not 1 <= limit <= MAX_BATCH:
+            raise ValidationError(f"limit must be 1-{MAX_BATCH}")
+        async with self.uow_factory(user_id) as uow:
+            queued = await uow.app_details.list_by_states(user_id, [S.QUEUED])  # deadline ASC
+        with_portal = [(app, opp) for app, opp in queued if opp.portal_url]
+        picked = with_portal[:limit]
+        for app, _ in picked:
+            await self.runner.start(user_id, app.id)
+        return BatchResult(
+            [app.id for app, _ in picked], skipped_no_portal=len(queued) - len(with_portal)
+        )
 
 
 @dataclass(frozen=True, slots=True)

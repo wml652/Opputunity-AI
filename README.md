@@ -53,6 +53,34 @@ in `backend/.env`:
 With no provider configured in development, messages (including verification codes) are written to
 `.logs/notifications.log` instead of being delivered.
 
+### Search engines, bot-protected sites, LinkedIn
+
+**Settings › Search & Sessions** holds the following (each stored encrypted):
+- your Tavily/Brave API keys;
+- sites that showed a bot challenge ("Solve challenge in browser" opens a visible window: you
+  pass the check once, and the cookies are saved);
+- the opt-in, capped, signed-in LinkedIn session.
+
+### Final verification (nothing is submitted without your OK)
+
+**Inbox › Ready for OK › Verify & submit** shows:
+- the full-page portal screenshot;
+- every field value, which you can edit;
+- the preview hash.
+
+**OK — Verify & Submit** works as follows:
+- it re-fills the portal with exactly the approved values and checks each one on the page;
+- it submits only when all of them match;
+- it then stores the receipt screenshot and confirmation text.
+
+**Reject / Cancel** discards the application.
+
+### Docker (cloud only)
+
+`backend/Dockerfile.api`, `backend/Dockerfile.worker` (headless Chromium) and
+`frontend/Dockerfile` (Next.js standalone). Run migrations as a release step with the owner role:
+`alembic upgrade head`. Local development does not need Docker.
+
 ### Flight recorder
 
 Every crawled page records a step-by-step trace (discovery → preflight/SSRF → fetch → distill →

@@ -143,3 +143,26 @@ def build_search_chain(
         providers.append(BraveSearchAdapter(brave_key, http))
     providers.append(DdgsSearchAdapter())
     return ChainedSearchProvider(providers)
+
+
+class SearchChainFactory:
+    """Builds a per-user chain: the user's own Tavily/Brave keys first, then the zero-key
+    fallback. Server-level keys (`.env`) are used when the user saved none."""
+
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        *,
+        default_tavily_key: str | None = None,
+        default_brave_key: str | None = None,
+    ) -> None:
+        self._http = http
+        self._tavily = default_tavily_key
+        self._brave = default_brave_key
+
+    def create(self, *, tavily_key: str | None, brave_key: str | None) -> ChainedSearchProvider:
+        return build_search_chain(
+            tavily_key=tavily_key or self._tavily,
+            brave_key=brave_key or self._brave,
+            http=self._http,
+        )

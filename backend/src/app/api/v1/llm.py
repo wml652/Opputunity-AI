@@ -56,6 +56,11 @@ async def create_provider(
             embedding_model=body.embedding_model,
             embedding_api_key=_secret(body.embedding_api_key),
             activate=body.activate,
+            extraction_model=body.extraction_model,
+            rerank_model=body.rerank_model,
+            rerank_base_url=body.rerank_base_url,
+            vision_model=body.vision_model,
+            rpm_limit=body.rpm_limit,
         ),
     )
     return ProviderConfigOut.of(view)
@@ -76,6 +81,11 @@ async def update_provider(
             embedding_base_url=body.embedding_base_url,
             embedding_model=body.embedding_model,
             embedding_api_key=_secret(body.embedding_api_key),
+            extraction_model=body.extraction_model,
+            rerank_model=body.rerank_model,
+            rerank_base_url=body.rerank_base_url,
+            vision_model=body.vision_model,
+            rpm_limit=body.rpm_limit,
             fields_set=frozenset(body.model_fields_set),
         ),
     )

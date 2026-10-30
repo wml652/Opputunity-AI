@@ -1,9 +1,9 @@
 """Polite, bounded, best-first site crawler.
 
 * Stays on the seed's registrable domain (and its subdomains).
-* Follows only links that look relevant: the user's keywords, opportunity vocabulary, or
-  pagination ("next", "?page=2"). Highest-scoring links are fetched first, up to `max_depth`
-  and `max_pages_per_site`.
+* Follows only links that look relevant (`detail_link_score`): opportunity detail slugs and the
+  user's keywords first; the first index pages only (never `/page/38/`); no taxonomy/social
+  links. Highest-scoring links are fetched first, up to `max_depth` and `max_pages_per_site`.
 * Honors robots.txt (fetched through the SSRF-safe client) and waits `politeness_seconds`
   between requests to the same host.
 """
@@ -19,8 +19,10 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from urllib.parse import urlsplit, urlunsplit
 
+from app.domain.discovery.listing import detail_link_score
 from app.domain.discovery.models import CampaignSettings, FetchedPage, registrable_host
 from app.domain.discovery.playbook import FetchStrategy, Stage, StepStatus
+from app.domain.ports.discovery import FetchedDocument
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.distiller import extract_links
 from app.infrastructure.scraping.fetchers import PageFetcher, PlaywrightFetcher, SafeHttpFetcher
@@ -33,32 +35,6 @@ _SKIP_EXT = re.compile(
     r"docx?|xlsx?|pptx?|pdf)$",
     re.I,
 )
-OPPORTUNITY_WORDS = (
-    "scholarship",
-    "internship",
-    "fellowship",
-    "grant",
-    "opportunit",
-    "program",
-    "apply",
-    "application",
-    "call",
-    "research",
-    "award",
-    "bursary",
-    "funding",
-    "job",
-    "career",
-    "vacanc",
-    "position",
-    "admission",
-    "exchange",
-    "summer",
-    "deadline",
-)
-PAGINATION = re.compile(
-    r"(?:[?&](?:page|p|start|offset)=\d+|/page/\d+|\bnext\b|\bolder\b|\u203a|\u00bb|\bmore\b)", re.I
-)
 
 
 def _normalize(url: str) -> str:
@@ -67,17 +43,11 @@ def _normalize(url: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
 
 
-def link_score(url: str, anchor: str, keywords: Sequence[str]) -> int:
-    hay = f"{url} {anchor}".lower()
-    score = 0
-    for kw in keywords:
-        tokens = [t for t in re.split(r"\W+", kw.lower()) if len(t) > 2]
-        if tokens and any(t in hay for t in tokens):
-            score += 3
-    score += 2 * sum(1 for w in OPPORTUNITY_WORDS if w in hay)
-    if PAGINATION.search(hay):
-        score += 2
-    return score
+def link_score(url: str, anchor: str, keywords: Sequence[str], seed: str = "") -> int:
+    """Best-first priority of a link (<= 0: not followed). Delegates to the domain scorer, which
+    boosts opportunity detail slugs and keyword matches and penalizes pagination beyond page 2
+    (`/page/38/`), taxonomy pages (`/tag/`, `/author/`, bare categories) and social links."""
+    return detail_link_score(url, anchor, list(keywords), seed or url)
 
 
 def same_site(url: str, seed: str) -> bool:
@@ -177,13 +147,17 @@ class SiteCrawler:
                     continue
                 if not same_site(norm, seed) or _SKIP_EXT.search(urlsplit(norm).path):
                     continue
-                score = link_score(norm, anchor, keywords)
+                score = link_score(norm, anchor, keywords, seed)
                 if score <= 0:
                     continue
                 seen.add(norm)
                 origin[norm] = (page.final_url, anchor)
                 order += 1
                 heapq.heappush(frontier, (-score, depth + 1, order, norm))
+
+    async def fetch_document(self, url: str) -> FetchedDocument:
+        await self._polite(url)
+        return await self._http.fetch_document(url)
 
     async def aclose(self) -> None:
         if self._page_fetcher is not self._http:
@@ -207,9 +181,17 @@ class SiteCrawlerFactory:
         self._delay = politeness_seconds
         self._respect_robots = respect_robots
 
-    def create(self) -> SiteCrawler:
+    def create(
+        self, sessions: dict[str, str] | None = None, *, screenshots: bool = False
+    ) -> SiteCrawler:
+        """`sessions`: domain -> decrypted storage_state of a user-solved browser session.
+        `screenshots`: capture text-sparse pages for the user's vision model."""
         http = SafeHttpFetcher(self._guard)
-        page_fetcher: PageFetcher = PlaywrightFetcher(self._guard) if self._use_playwright else http
+        page_fetcher: PageFetcher = (
+            PlaywrightFetcher(self._guard, sessions, screenshots=screenshots)
+            if self._use_playwright
+            else http
+        )
         return SiteCrawler(
             page_fetcher=page_fetcher,
             http=http,

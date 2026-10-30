@@ -13,6 +13,7 @@ from app.infrastructure.db.repositories.applications import (
     SqlCheckpointRepository,
     SqlEssayDraftRepository,
     SqlFieldRepository,
+    SqlFinalVerificationRepository,
     SqlNotificationRepository,
     SqlQuestionRepository,
 )
@@ -33,7 +34,12 @@ from app.infrastructure.db.repositories.llm import (
     SqlConnectionCheckRepository,
     SqlLLMConfigRepository,
 )
+from app.infrastructure.db.repositories.sessions import (
+    SqlBrowserSessionRepository,
+    SqlSearchCredentialRepository,
+)
 from app.infrastructure.db.repositories.vault import (
+    SqlDocumentChunkRepository,
     SqlDocumentRepository,
     SqlEssayRepository,
     SqlFingerprintRepository,
@@ -99,6 +105,10 @@ class SqlAlchemyUnitOfWork:
         self.essay_drafts = SqlEssayDraftRepository(session)
         self.channels = SqlChannelRepository(session)
         self.notifications = SqlNotificationRepository(session)
+        self.browser_sessions = SqlBrowserSessionRepository(session)
+        self.search_credentials = SqlSearchCredentialRepository(session)
+        self.verifications = SqlFinalVerificationRepository(session)
+        self.document_chunks = SqlDocumentChunkRepository(session)
         return self
 
     async def __aexit__(

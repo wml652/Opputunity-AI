@@ -26,6 +26,10 @@ class Stage(enum.StrEnum):
     BROWSER_FETCH = "BROWSER_FETCH"
     HTTP_FETCH = "HTTP_FETCH"
     DISTILL_AND_SANITIZE = "DISTILL_AND_SANITIZE"
+    HUB_HARVEST = "HUB_HARVEST"  # listing page: cards harvested, detail links queued
+    PDF_PARSE = "PDF_PARSE"  # an opportunity published as a PDF brochure / call document
+    VISION_PARSE = "VISION_PARSE"  # image/table-only page read by the user's vision model
+    RAG_FILTER = "RAG_FILTER"  # only high-signal sections of a long page reach the LLM
     LLM_EXTRACTION = "LLM_EXTRACTION"
 
 
@@ -118,6 +122,9 @@ class ExtractionStrategy:
     overlap_chars: int = 400
     max_tokens: int = 8_192  # room for reasoning models that think before answering
     level: int = 0
+    # Per-page window budget. Pages beyond it are NOT silently cut: the trace records
+    # `truncated_windows` and the inspector flags the page.
+    max_windows: int = 24
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +132,7 @@ class ExtractionStrategy:
             "overlap_chars": self.overlap_chars,
             "max_tokens": self.max_tokens,
             "level": self.level,
+            "max_windows": self.max_windows,
         }
 
     @staticmethod
@@ -136,21 +144,78 @@ class ExtractionStrategy:
 
 
 TRANSIENT_FETCH_CODES = frozenset(
-    {"http_403", "http_429", "http_503", "timeout", "empty_content", "network"}
+    {
+        "http_403",
+        "http_429",
+        "http_503",
+        "timeout",
+        "empty_content",
+        "network",
+        "dns_error",
+        "tunnel_connect_error",
+    }
 )
 PERMANENT_CODES = frozenset({"http_404", "http_410", "login_wall"})
+# Domain-level: a bot-protection challenge (Cloudflare "Just a moment...") cannot be passed by
+# automation (and must not be: no CAPTCHA/challenge solving). Remembered per domain so later
+# campaigns skip it at once, unless the user solved it in a headful browser and saved a session.
+DOMAIN_BLOCKING_CODES = frozenset({"bot_challenge"})
+
+_CHALLENGE_MARKERS = (
+    "<title>just a moment...</title>",
+    "<title>just a moment…</title>",
+    "checking your browser",
+    "attention required! | cloudflare",
+    "cf-browser-verification",
+    "challenge-platform",
+    "_cf_chl_opt",
+    "cf_chl_",
+    "ddos-guard",
+    "please enable cookies and javascript to continue",
+    "verify you are human",
+    "px-captcha",
+)
+
+
+def detect_bot_challenge(status: int | None, html: str, headers: dict[str, str]) -> str | None:
+    """Returns the protection vendor when the response is an interstitial bot challenge."""
+    lowered = {k.lower(): v for k, v in headers.items()}
+    if lowered.get("cf-mitigated", "").lower() == "challenge":
+        return "cloudflare"
+    head = html[:20_000].lower()
+    if any(marker in head for marker in _CHALLENGE_MARKERS):
+        if "ddos-guard" in head:
+            return "ddos-guard"
+        if "px-captcha" in head:
+            return "perimeterx"
+        return "cloudflare"
+    if (
+        status in (403, 503)
+        and "cloudflare" in lowered.get("server", "").lower()
+        and len(html) < 40_000
+    ):
+        return "cloudflare"
+    return None
 
 
 def fetch_error_code(status: int | None, error: str | None, html_len: int) -> str | None:
-    """Normalized failure code for a fetch, or None when it succeeded."""
+    """Normalized failure code for a fetch, or None when it succeeded. Network-level codes
+    (`dns_error`, `tunnel_connect_error`) are kept apart from real `ssrf_blocked` violations."""
     if error:
         low = error.lower()
+        for code in ("bot_challenge", "dns_error", "tunnel_connect_error", "login_wall"):
+            if low.startswith(code):
+                return code
         if "timeout" in low:
             return "timeout"
         if "ssrf" in low:
             return "ssrf_blocked"
         if "not html" in low:
             return "not_html"
+        if "err_name_not_resolved" in low:
+            return "dns_error"
+        if "err_tunnel_connection_failed" in low or "err_proxy_connection_failed" in low:
+            return "tunnel_connect_error"
         return "network"
     if status is not None and status >= 400:
         return f"http_{status}"
@@ -167,10 +232,19 @@ def escalate_fetch(current: FetchStrategy, code: str) -> FetchStrategy | None:
     if code == "http_429":
         return replace(current, backoff_s=max(5.0, current.backoff_s * 2 or 5.0), level=nxt)
     if code == "timeout":
-        # Slow sites: stop waiting for full DOM parsing; render what arrived, then hydrate.
+        # Slow sites: the browser already fell back to plain HTTP inside the same attempt
+        # (fast path for static pages). Next: let the full `load` event fire with more time;
+        # never snapshot at `commit`, which captured empty shells.
         return replace(
-            current, wait_until="commit", timeout_ms=45_000, hydration_ms=4_000, level=nxt
+            current,
+            mode="browser",
+            wait_until="load",
+            timeout_ms=45_000,
+            hydration_ms=3_000,
+            level=nxt,
         )
+    if code in ("dns_error", "tunnel_connect_error"):
+        return replace(current, backoff_s=max(2.0, current.backoff_s * 2 or 2.0), level=nxt)
     if code == "empty_content":
         return replace(
             current,
@@ -217,6 +291,9 @@ class DomainPlaybook:
     successes: int
     last_campaign_id: uuid.UUID | None
     updated_at: datetime
+    # {"vendor", "campaign_id", "at", "url"} once a bot challenge was seen; cleared when a
+    # user-solved browser session exists for the domain.
+    bot_challenge: dict[str, Any] | None = None
 
     @staticmethod
     def new(user_id: uuid.UUID, domain: str, now: datetime) -> DomainPlaybook:
@@ -231,7 +308,16 @@ class DomainPlaybook:
             successes=0,
             last_campaign_id=None,
             updated_at=now,
+            bot_challenge=None,
         )
+
+    def mark_challenged(self, vendor: str, url: str, campaign_id: uuid.UUID, at: datetime) -> None:
+        self.bot_challenge = {
+            "vendor": vendor,
+            "url": url,
+            "campaign_id": str(campaign_id),
+            "at": at.isoformat(),
+        }
 
     def record_failure(self, stage: Stage, code: str, campaign_id: uuid.UUID) -> None:
         key = f"{stage.value}:{code}"

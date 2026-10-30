@@ -21,6 +21,10 @@ from app.domain.ports.llm import (
     IEmbeddingProviderFactory,
     ILLMProvider,
     ILLMProviderFactory,
+    IRerankProvider,
+    IRerankProviderFactory,
+    IVisionProvider,
+    IVisionProviderFactory,
 )
 from app.domain.ports.net import IUrlGuard
 from app.domain.ports.uow import IUnitOfWork, IUnitOfWorkFactory
@@ -48,6 +52,11 @@ class ProviderConfigView:
     effective_embedding_model: str
     is_active: bool
     last_check: ConnectionCheck | None
+    extraction_model: str | None = None
+    rerank_model: str | None = None
+    rerank_base_url: str | None = None
+    vision_model: str | None = None
+    rpm_limit: int = 36
 
     @staticmethod
     def of(config: ProviderConfig, last_check: ConnectionCheck | None) -> ProviderConfigView:
@@ -71,7 +80,15 @@ class ProviderConfigView:
             effective_embedding_model=route.model,
             is_active=config.is_active,
             last_check=last_check,
+            extraction_model=config.extraction_model,
+            rerank_model=config.rerank_model,
+            rerank_base_url=config.rerank_base_url,
+            vision_model=config.vision_model,
+            rpm_limit=config.rpm_limit,
         )
+
+
+DEFAULT_RPM_LIMIT = 36  # under build.nvidia.com's 40 requests/minute
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +99,8 @@ class LLMDeps:
     provider_factory: ILLMProviderFactory
     embedding_factory: IEmbeddingProviderFactory
     clock: Clock
+    rerank_factory: IRerankProviderFactory | None = None
+    vision_factory: IVisionProviderFactory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +114,11 @@ class ProviderConfigInput:
     embedding_model: str | None = None
     embedding_api_key: str | None = None
     activate: bool = True
+    extraction_model: str | None = None
+    rerank_model: str | None = None
+    rerank_base_url: str | None = None
+    vision_model: str | None = None
+    rpm_limit: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +133,11 @@ class ProviderConfigPatch:
     embedding_base_url: str | None = None
     embedding_model: str | None = None
     embedding_api_key: str | None = None
+    extraction_model: str | None = None
+    rerank_model: str | None = None
+    rerank_base_url: str | None = None
+    vision_model: str | None = None
+    rpm_limit: int | None = None
     fields_set: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -125,6 +154,19 @@ def _encrypt(
     deps: LLMDeps, column: str, user_id: uuid.UUID, row_id: uuid.UUID, secret: str
 ) -> EncryptedSecret:
     return deps.cipher.encrypt(secret.encode(), aad(TABLE, column, user_id, row_id))
+
+
+async def _optional_url(deps: LLMDeps, value: str | None) -> str | None:
+    url = _clean(value)
+    return (await deps.url_guard.validate(url)).rstrip("/") if url else None
+
+
+def _rpm(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_RPM_LIMIT
+    if not 1 <= value <= 10_000:
+        raise ValidationError("rpm_limit must be between 1 and 10000 requests per minute")
+    return value
 
 
 def _clean(value: str | None) -> str | None:
@@ -178,6 +220,11 @@ class CreateProviderConfig:
             api_key_last4=last4(api_key),
             embedding_base_url=embedding_base_url,
             embedding_model=_clean(data.embedding_model),
+            extraction_model=_clean(data.extraction_model),
+            rerank_model=_clean(data.rerank_model),
+            rerank_base_url=await _optional_url(self.deps, data.rerank_base_url),
+            vision_model=_clean(data.vision_model),
+            rpm_limit=_rpm(data.rpm_limit),
             embedding_api_key=(
                 _encrypt(self.deps, "embedding_api_key", user_id, row_id, embedding_key)
                 if embedding_key
@@ -248,6 +295,16 @@ class UpdateProviderConfig:
                 )
             if "embedding_model" in patch.fields_set:
                 config.embedding_model = _clean(patch.embedding_model)
+            if "extraction_model" in patch.fields_set:
+                config.extraction_model = _clean(patch.extraction_model)
+            if "rerank_model" in patch.fields_set:
+                config.rerank_model = _clean(patch.rerank_model)
+            if "rerank_base_url" in patch.fields_set:
+                config.rerank_base_url = await _optional_url(self.deps, patch.rerank_base_url)
+            if "vision_model" in patch.fields_set:
+                config.vision_model = _clean(patch.vision_model)
+            if "rpm_limit" in patch.fields_set:
+                config.rpm_limit = _rpm(patch.rpm_limit)
             if "embedding_api_key" in patch.fields_set:
                 emb_key = _clean(patch.embedding_api_key)
                 config.embedding_api_key = (
@@ -409,7 +466,9 @@ class ResolveChatProvider:
 
     deps: LLMDeps
 
-    async def execute(self, user_id: uuid.UUID) -> ILLMProvider:
+    async def execute(self, user_id: uuid.UUID, *, purpose: str = "primary") -> ILLMProvider:
+        """`purpose="extraction"` uses the user's optional Fast Extraction Model when they typed
+        one; otherwise (and for eligibility, essays, verification) the primary `model`."""
         async with self.deps.uow_factory(user_id) as uow:
             config = await uow.llm_configs.get_active(user_id)
         if config is None:
@@ -421,8 +480,67 @@ class ResolveChatProvider:
         key = self.deps.cipher.decrypt(
             config.api_key, aad(TABLE, "api_key", user_id, config.id)
         ).decode()
+        model = config.model
+        if purpose == "extraction" and config.extraction_model:
+            model = config.extraction_model
         return self.deps.provider_factory.create(
-            base_url=config.base_url, api_key=key, model=config.model
+            base_url=config.base_url, api_key=key, model=model, rpm_limit=config.rpm_limit
+        )
+
+
+async def _active_with_key(deps: LLMDeps, user_id: uuid.UUID) -> tuple[ProviderConfig, str] | None:
+    async with deps.uow_factory(user_id) as uow:
+        config = await uow.llm_configs.get_active(user_id)
+    if config is None:
+        return None
+    key = deps.cipher.decrypt(config.api_key, aad(TABLE, "api_key", user_id, config.id)).decode()
+    return config, key
+
+
+@dataclass(slots=True)
+class ResolveRerankProvider:
+    """The user's reranker, or None when `rerank_model` is blank (local hybrid scoring then)."""
+
+    deps: LLMDeps
+
+    async def execute(self, user_id: uuid.UUID) -> IRerankProvider | None:
+        if self.deps.rerank_factory is None:
+            return None
+        found = await _active_with_key(self.deps, user_id)
+        if found is None:
+            return None
+        config, key = found
+        model = config.rerank_model
+        if not model:
+            return None
+        base = config.rerank_base_url or config.base_url
+        await self.deps.url_guard.validate(base)
+        return self.deps.rerank_factory.create(
+            base_url=base, api_key=key, model=model, rpm_limit=config.rpm_limit
+        )
+
+
+@dataclass(slots=True)
+class ResolveVisionProvider:
+    """The user's multimodal model, or None when `vision_model` is blank (text-only parsing)."""
+
+    deps: LLMDeps
+
+    async def execute(self, user_id: uuid.UUID) -> IVisionProvider | None:
+        if self.deps.vision_factory is None:
+            return None
+        found = await _active_with_key(self.deps, user_id)
+        if found is None:
+            return None
+        config, key = found
+        model = config.vision_model
+        if not model:
+            return None
+        return self.deps.vision_factory.create(
+            base_url=config.base_url,
+            api_key=key,
+            model=model,
+            rpm_limit=config.rpm_limit,
         )
 
 

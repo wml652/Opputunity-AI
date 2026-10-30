@@ -24,9 +24,16 @@ const DISCOVERY_EVENTS = new Set([
   "page.adapted",
   "page.retrying",
   "page.retried",
+  "source.failed",
 ]);
 // Filler, inbox, essay and memory events refresh the application/inbox caches.
-const APPLICATION_EVENTS = new Set(["application.state", "essay.draft_created", "memory.learned"]);
+const APPLICATION_EVENTS = new Set([
+  "application.state",
+  "application.submission",
+  "essay.draft_created",
+  "memory.learned",
+]);
+const SESSION_EVENTS = new Set(["session.captured", "session.failed"]);
 
 export type StreamState = "connecting" | "live" | "reconnecting";
 
@@ -61,15 +68,23 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     let source: EventSource | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    // Counters arrive per page; coalesce cache refreshes to at most one every 400 ms.
-    const scheduleDiscoveryRefresh = () => {
-      if (refreshTimer) return;
-      refreshTimer = setTimeout(() => {
-        refreshTimer = undefined;
-        void qc.invalidateQueries({ queryKey: discoveryKeys.all });
-      }, 400);
+    // Events arrive in bursts (counters per page, or dozens replayed after a reconnect).
+    // Coalesce cache refreshes per group to at most one per window, and never cancel a fetch
+    // that is already in flight: invalidating per event fired ~20 identical GETs per second.
+    const pending = new Map<string, ReturnType<typeof setTimeout>>();
+    const coalesce = (group: string, queryKeys: readonly (readonly unknown[])[], ms: number) => {
+      if (pending.has(group)) return;
+      pending.set(
+        group,
+        setTimeout(() => {
+          pending.delete(group);
+          for (const queryKey of queryKeys) {
+            void qc.invalidateQueries({ queryKey }, { cancelRefetch: false });
+          }
+        }, ms),
+      );
     };
+    const scheduleDiscoveryRefresh = () => coalesce("discovery", [discoveryKeys.all], 400);
 
     const onEvent = (raw: MessageEvent<string>) => {
       const parsed = pipelineEventSchema.safeParse(JSON.parse(raw.data));
@@ -79,14 +94,11 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       lastSeq.current = event.seq;
       setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
       if (event.type === "llm.status" || event.type === "llm.config_changed") {
-        void qc.invalidateQueries({ queryKey: keys.status });
-        void qc.invalidateQueries({ queryKey: keys.providers });
+        coalesce("llm", [keys.status, keys.providers], 300);
       }
       if (DISCOVERY_EVENTS.has(event.type)) scheduleDiscoveryRefresh();
-      if (APPLICATION_EVENTS.has(event.type)) {
-        void qc.invalidateQueries({ queryKey: ["m4"] });
-        void qc.invalidateQueries({ queryKey: keys.inbox });
-      }
+      if (APPLICATION_EVENTS.has(event.type)) coalesce("applications", [["m4"], keys.inbox], 300);
+      if (SESSION_EVENTS.has(event.type)) coalesce("sessions", [["sessions"]], 200);
     };
 
     const open = () => {
@@ -117,7 +129,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       stopped = true;
       clearInterval(keepAlive);
       if (retryTimer) clearTimeout(retryTimer);
-      if (refreshTimer) clearTimeout(refreshTimer);
+      for (const timer of pending.values()) clearTimeout(timer);
       source?.close();
     };
   }, [qc]);

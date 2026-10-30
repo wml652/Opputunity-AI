@@ -160,6 +160,23 @@ def build_app() -> FastAPI:
         STATE.submissions.append({"draft": dict(draft or {}), "cv_bytes": len(data)})
         return _page("Application submitted", "<p>Thank you.</p>")
 
+    @app.get("/official/{slug}")
+    async def official(slug: str) -> Response:
+        """An official programme page on another host (linked from a listicle hub)."""
+        fields = {
+            "Title": "Eta Global Research Fellowship",
+            "Organization": "Eta Foundation",
+            "Type": "RESEARCH",
+            "Deadline": "2099-06-01",
+            "Degree": "BACHELOR",
+            "Apply": "/apply",
+        }
+        lines = "".join(f"<p>{k}: {v}</p>" for k, v in fields.items())
+        prose = "<p>The Eta Foundation funds international undergraduate researchers.</p>" * 3
+        return _page(
+            fields["Title"], f"<article>{lines}{prose}</article><p>{html.escape(slug)}</p>"
+        )
+
     @app.post("/__wipe")
     async def wipe() -> Response:
         STATE.drafts.clear()

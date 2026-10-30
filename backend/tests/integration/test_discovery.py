@@ -234,16 +234,18 @@ async def test_full_campaign_dedupes_evaluates_and_queues_by_deadline(
             "SELECT payload->>'phase' AS phase FROM pipeline_events "
             "WHERE type = 'campaign.phase' ORDER BY seq"
         )
+        order = await conn.fetch(
+            "SELECT type, payload->>'phase' AS phase FROM pipeline_events "
+            "WHERE type IN ('campaign.phase', 'eligibility.verdict') ORDER BY seq"
+        )
     finally:
         await conn.close()
     assert [tuple(t) for t in transitions] == [("ELIGIBLE", "QUEUED")] * 2
-    assert [p["phase"] for p in phases] == [
-        "CRAWLING",
-        "EXTRACTING",
-        "EVALUATING",
-        "QUEUED",
-        "COMPLETED",
-    ]
+    # Streaming pipeline: extraction + eligibility run WHILE crawling; EXTRACTING only drains.
+    assert [p["phase"] for p in phases] == ["CRAWLING", "EXTRACTING", "COMPLETED"]
+    first_verdict = next(i for i, r in enumerate(order) if r["type"] == "eligibility.verdict")
+    drain = next(i for i, r in enumerate(order) if r["phase"] == "EXTRACTING")
+    assert first_verdict < drain  # a verdict streamed before crawling finished
 
     # Re-running finds the same listings again: everything dedupes, nothing is re-queued.
     again = await user.post(
@@ -382,7 +384,7 @@ async def test_campaign_streams_phases_and_counters_over_sse(
             infra.campaign_runner = None
 
     phases = [e["payload"]["phase"] for e in events if e["type"] == "campaign.phase"]
-    assert phases == ["CRAWLING", "EXTRACTING", "EVALUATING", "QUEUED", "COMPLETED"]
+    assert phases == ["CRAWLING", "EXTRACTING", "COMPLETED"]
     types = [e["type"] for e in events]
     assert types.count("page.crawled") == 9  # 8 distilled + 1 blocked
     assert types.count("opportunity.found") == 4

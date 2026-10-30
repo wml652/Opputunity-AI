@@ -75,6 +75,13 @@ class ProviderConfigCreate(BaseModel):
     api_key: SecretStr = Field(min_length=8, max_length=4096)
     embedding_base_url: str | None = Field(default=None, max_length=2048)
     embedding_model: str | None = Field(default=None, max_length=200)
+    # Optional, user-typed fast model for discovery extraction. Blank = use `model`.
+    extraction_model: str | None = Field(default=None, max_length=200)
+    # Optional, user-typed slots; blank = local fallbacks. Never pre-filled.
+    rerank_model: str | None = Field(default=None, max_length=200)
+    rerank_base_url: str | None = Field(default=None, max_length=500)
+    vision_model: str | None = Field(default=None, max_length=200)
+    rpm_limit: int | None = Field(default=None, ge=1, le=10_000)
     embedding_api_key: SecretStr | None = Field(default=None, max_length=4096)
     activate: bool = True
 
@@ -86,6 +93,12 @@ class ProviderConfigUpdate(BaseModel):
     api_key: SecretStr | None = Field(default=None, max_length=4096)
     embedding_base_url: str | None = Field(default=None, max_length=2048)
     embedding_model: str | None = Field(default=None, max_length=200)
+    # Optional, user-typed fast model for discovery extraction. Blank = use `model`.
+    extraction_model: str | None = Field(default=None, max_length=200)
+    rerank_model: str | None = Field(default=None, max_length=200)
+    rerank_base_url: str | None = Field(default=None, max_length=500)
+    vision_model: str | None = Field(default=None, max_length=200)
+    rpm_limit: int | None = Field(default=None, ge=1, le=10_000)
     embedding_api_key: SecretStr | None = Field(default=None, max_length=4096)
 
 
@@ -122,6 +135,11 @@ class ProviderConfigOut(_Out):
     api_key_last4: str
     embedding_base_url: str | None
     embedding_model: str | None
+    extraction_model: str | None
+    rerank_model: str | None
+    rerank_base_url: str | None
+    vision_model: str | None
+    rpm_limit: int
     has_embedding_key: bool
     effective_embedding_model: str
     is_active: bool
@@ -138,6 +156,11 @@ class ProviderConfigOut(_Out):
             api_key_last4=view.api_key_last4,
             embedding_base_url=view.embedding_base_url,
             embedding_model=view.embedding_model,
+            extraction_model=view.extraction_model,
+            rerank_model=view.rerank_model,
+            rerank_base_url=view.rerank_base_url,
+            vision_model=view.vision_model,
+            rpm_limit=view.rpm_limit,
             has_embedding_key=view.has_embedding_key,
             effective_embedding_model=view.effective_embedding_model,
             is_active=view.is_active,

@@ -53,6 +53,13 @@ Layers, top to bottom. A layer may import only layers below it.
   detection; tokens in `httpOnly` cookies; CSRF double-submit (`csrf_token` cookie +
   `X-CSRF-Token` header) on every cookie-authenticated mutating request.
 - Never submit an application without a recorded human "OK" whose `preview_hash` matches.
+  Batch auto-stage (`BatchPrepare`, `POST /applications/batch-prepare`, campaign `auto_stage`)
+  only fills up to `AWAITING_FINAL_VERIFICATION` / `PAUSED_NEEDS_USER_INPUT`, max 25 at a time.
+- Evidence RAG (`ProfileEvidenceRetriever`): CV/transcript `document_chunks`, essay chunks and
+  memory snippets are PII-redacted (`redact_pii` with the profile's known PII values) BEFORE any
+  model call; the model's answer is redacted again. Auto-fill only when model confidence x
+  grounding overlap >= 0.85; otherwise the question still pauses, with the suggestion attached.
+  PII fields themselves are only ever filled by the deterministic profile mapper.
 
 ## 3. Windows Native Asyncio & Playwright Compatibility
 
@@ -86,6 +93,28 @@ Layers, top to bottom. A layer may import only layers below it.
   0.85 auto-fill threshold. Essay chunks use passage (index) / query (search).
 - Per-tenant vector search uses a `MATERIALIZED` CTE filtered by `user_id` (exact ranking); do
   not rely on HNSW iterative scans (pgvector 0.8): the embedded dev DB ships 0.6.2.
+- Optional model slots `extraction_model`, `rerank_model` (+ `rerank_base_url`) and
+  `vision_model` are blank by default and hold only what the user typed. Blank rerank = the local
+  hybrid scorer (BM25 + opportunity signals + embedding cosine) in
+  `app.domain.discovery.rag_filter`; blank vision = text/HTML/pypdf parsing only (no screenshots
+  are even captured). Resolvers return `None` for a blank slot; never fall back to another id.
+- `tests/unit/test_m6_units.py::test_no_model_id_is_hardcoded_in_source` scans `backend/src` and
+  `frontend/src` for vendor model ids; keep it green (placeholders say "exact model id").
+
+## 4a. LLM Call Economy (in-page RAG + pacing)
+
+- Every outbound call on a provider key (chat, extraction, eligibility, rerank, vision) acquires
+  the shared sliding-window limiter from `app.infrastructure.llm.rate_limiter.RateLimiterRegistry`
+  (keyed by host + key hash; `rpm_limit` on the provider, default 36, editable live). Pace
+  proactively; never rely on 429 retries for throughput.
+- Pages longer than `MIN_FILTER_CHARS` go through the in-page RAG filter before extraction:
+  semantic sections are scored, the lead + relevant sections are kept, and when the result fits
+  `SINGLE_WINDOW_CHARS` (6000) it is extracted in ONE call. Multi-opportunity pages keep every
+  relevant section (never drop a listed opportunity to save tokens). Record a `RAG_FILTER` trace
+  step with `rag_sections_total`, `rag_sections_kept`, `chars_saved_pct`, `scorer`.
+- PDF opportunity URLs are fetched as documents (SSRF-checked per hop, 15 MB cap), parsed by
+  `IDocumentLayoutParser` (`PDF_PARSE` step); low-text pages go to the vision model only when
+  the user configured one (`VISION_PARSE` step).
 
 ## 5. UI/UX Design System Mandate (Zero AI Slop)
 

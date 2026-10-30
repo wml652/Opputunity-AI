@@ -7,8 +7,15 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.application.applications.submission import (
+    ApproveSubmission,
+    GetReceiptScreenshot,
+    GetVerification,
+    RejectApplication,
+)
 from app.application.applications.use_cases import (
     AnswerQuestion,
+    BatchPrepare,
     GetApplicationDetail,
     GetCheckpointScreenshot,
     GetInbox,
@@ -21,6 +28,14 @@ from app.application.auth.use_cases import (
     Logout,
     RefreshSession,
     RegisterUser,
+)
+from app.application.discovery.sessions import (
+    CaptureBrowserSession,
+    DeleteBrowserSession,
+    DeleteSearchCredential,
+    ListBrowserSessions,
+    ListSearchCredentials,
+    SaveSearchCredential,
 )
 from app.application.discovery.use_cases import (
     CancelCampaign,
@@ -136,6 +151,17 @@ class DiscoveryUseCases:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionUseCases:
+    list_sessions: ListBrowserSessions
+    capture: CaptureBrowserSession
+    delete_session: DeleteBrowserSession
+    list_search: ListSearchCredentials
+    save_search: SaveSearchCredential
+    delete_search: DeleteSearchCredential
+    headful_available: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationUseCases:
     detail: GetApplicationDetail
     start: StartFilling
@@ -145,6 +171,11 @@ class ApplicationUseCases:
     synthesize: SynthesizeEssay
     edit_draft: EditEssayDraft
     list_drafts: ListEssayDrafts
+    verification: GetVerification
+    batch: BatchPrepare
+    approve: ApproveSubmission
+    reject: RejectApplication
+    receipt: GetReceiptScreenshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,3 +220,4 @@ class ApiContainer:
     discovery: DiscoveryUseCases
     applications: ApplicationUseCases
     notifications: NotificationUseCases
+    sessions: SessionUseCases

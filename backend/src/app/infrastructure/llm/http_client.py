@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from app.domain.llm.provider import ConnectionErrorCode, LLMProviderError
+from app.infrastructure.llm.rate_limiter import SlidingWindowRateLimiter
 from app.infrastructure.logging import redact_text
 
 _MAX_ERROR_CHARS = 300
@@ -73,7 +74,9 @@ class OpenAICompatibleClient:
         api_key: str | None,
         http_client: httpx.AsyncClient,
         timeout: float,
+        limiter: SlidingWindowRateLimiter | None = None,
     ) -> None:
+        self._limiter = limiter
         self._base = base_url.rstrip("/")
         self._http = http_client
         self._timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
@@ -91,6 +94,8 @@ class OpenAICompatibleClient:
     ) -> dict[str, Any]:
         attempt = 0
         while True:
+            if self._limiter is not None:
+                await self._limiter.acquire()  # proactive RPM pacing (retries included)
             try:
                 response = await self._http.request(
                     method,

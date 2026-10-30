@@ -10,7 +10,7 @@ import { StatusPill } from "@/components/ui/status";
 import { cn, formatTime } from "@/lib/cn";
 import { usePipelineSummary, useQueue } from "@/lib/discovery-queries";
 import { useEventStream } from "@/lib/event-stream";
-import { useStartFilling } from "@/lib/m4-queries";
+import { useBatchPrepare, useStartFilling } from "@/lib/m4-queries";
 import { llmStatusPayloadSchema, type PipelineEvent } from "@/lib/schemas";
 
 const COUNTERS = [
@@ -24,9 +24,10 @@ const COUNTERS = [
 
 // Campaign phases (M3) followed by the application phases arriving in M4/M5.
 const PHASES = [
-  { key: "CRAWLING", label: "Crawling" },
-  { key: "EXTRACTING", label: "Extracting" },
-  { key: "EVALUATING", label: "Evaluating" },
+  // Streaming pipeline: pages are extracted, evaluated and queued while crawling continues.
+  { key: "CRAWLING", label: "Crawl · extract · evaluate" },
+  { key: "EXTRACTING", label: "Finishing extraction" },
+  { key: "EVALUATING", label: "Evaluated" },
   { key: "QUEUED", label: "Queued" },
   { key: "FILLING", label: "Filling" },
   { key: "AWAITING_OK", label: "Awaiting OK" },
@@ -93,6 +94,17 @@ function describe(event: PipelineEvent): { summary: string; tone?: "ok" | "err" 
       return { summary: `Adapted ${String(p.domain)}: ${String(p.message)}`, tone: "warn" };
     case "page.retrying":
       return { summary: `Retrying ${String(p.url)} (${String(p.reason)}) with an escalated strategy`, tone: "warn" };
+    case "application.submission":
+      return {
+        summary: `Submission ${String(p.outcome).toLowerCase()}: ${String(p.title)}`,
+        tone: p.outcome === "SUBMITTED" ? "ok" : p.outcome === "RESTAGED" ? "warn" : "err",
+      };
+    case "source.failed":
+      return { summary: `Source ${String(p.source)} failed: ${String(p.error)} (campaign continues)`, tone: "err" };
+    case "session.captured":
+      return { summary: `Browser session saved for ${String(p.domain)}`, tone: "ok" };
+    case "session.failed":
+      return { summary: `Browser session for ${String(p.domain)} not saved: ${String(p.error)}`, tone: "err" };
     case "page.retried":
       return {
         summary: `Retried ${String(p.url)} -> ${String(p.status)}${p.error_code ? ` (${String(p.error_code)})` : ""}`,
@@ -104,6 +116,8 @@ function describe(event: PipelineEvent): { summary: string; tone?: "ok" | "err" 
       return { summary: `Document stored: ${String(p.kind)} · ${String(p.pages)} pages`, tone: "ok" };
     case "essay.fingerprint_updated":
       return { summary: `Fingerprint v${String(p.version)} · burstiness ${Number(p.burstiness).toFixed(3)}`, tone: "ok" };
+    case "applications.auto_staged":
+      return { summary: `Auto-staged ${String(p.count)} eligible application(s) up to the final OK gate`, tone: "ok" };
     case "memory.learned":
       return { summary: "New answer learned into semantic memory", tone: "ok" };
   }
@@ -229,8 +243,31 @@ export function PipelineOverview() {
 function QueuePanel() {
   const { data: queue } = useQueue();
   const start = useStartFilling();
+  const batch = useBatchPrepare();
+  const queued = queue?.filter((q) => q.state === "QUEUED" && q.opportunity.portal_url).length ?? 0;
   return (
-    <Panel title="Application queue" meta="deadline ASC" className="col-span-2">
+    <Panel
+      title="Application queue"
+      meta="deadline ASC"
+      className="col-span-2"
+      actions={
+        <Button
+          size="sm"
+          onClick={() => batch.mutate(Math.min(5, queued))}
+          disabled={batch.isPending || queued === 0}
+          title="Fill the 5 closest-deadline queued applications up to the final OK gate. Never submits."
+        >
+          {batch.isPending ? "Staging" : "Auto-Stage Eligible Queue"}
+        </Button>
+      }
+    >
+      {batch.data ? (
+        <p className="border-b border-line px-3 py-1 font-mono text-2xs text-muted">
+          staging {batch.data.started.length} · each still needs your OK before submit
+          {batch.data.skipped_no_portal ? ` · ${batch.data.skipped_no_portal} without a portal URL` : ""}
+        </p>
+      ) : null}
+      {batch.error ? <p className="border-b border-line px-3 py-1 text-xs text-err">Could not start auto-stage</p> : null}
       <table className="w-full table-fixed border-collapse">
         <thead>
           <tr>

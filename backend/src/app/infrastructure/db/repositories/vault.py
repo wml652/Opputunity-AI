@@ -14,7 +14,13 @@ from app.domain.essay.models import ReferenceEssay, StyleFingerprint
 from app.domain.llm.embedding import ensure_dim
 from app.domain.llm.provider import EncryptedSecret
 from app.domain.memory.models import KnowledgeQA
-from app.domain.ports.vault import EmbeddedChunk, ScoredQA, StoredDocument, StoredProfile
+from app.domain.ports.vault import (
+    DocumentHit,
+    EmbeddedChunk,
+    ScoredQA,
+    StoredDocument,
+    StoredProfile,
+)
 from app.domain.profile.documents import Document
 from app.domain.profile.models import GPA, Experience, Language, StudentPII, StudentProfile
 from app.domain.shared.ids import new_uuid7
@@ -326,6 +332,78 @@ class SqlEssayRepository:
             text("SELECT count(*) FROM essay_chunks WHERE user_id = :u"), {"u": user_id}
         )
         return int(count or 0)
+
+
+class SqlDocumentChunkRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def replace_chunks(
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        chunks: Sequence[EmbeddedChunk],
+        embedding_model: str,
+    ) -> None:
+        await self._s.execute(
+            text("DELETE FROM document_chunks WHERE user_id = :u AND document_id = :d"),
+            {"u": user_id, "d": document_id},
+        )
+        for chunk in chunks:
+            await self._s.execute(
+                text(
+                    "INSERT INTO document_chunks "
+                    "(id, user_id, document_id, ordinal, text, embedding, embedding_model) "
+                    "VALUES (:id, :u, :d, :o, :t, CAST(CAST(:v AS text) AS vector), :m)"
+                ),
+                {
+                    "id": new_uuid7(),
+                    "u": user_id,
+                    "d": document_id,
+                    "o": chunk.ordinal,
+                    "t": chunk.text,
+                    "v": vector_literal(chunk.vector),
+                    "m": embedding_model,
+                },
+            )
+
+    async def nearest(
+        self, user_id: uuid.UUID, vector: Sequence[float], embedding_model: str, k: int
+    ) -> builtins.list[DocumentHit]:
+        rows = (
+            await self._s.execute(
+                text(
+                    """
+                    WITH mine AS MATERIALIZED (
+                        SELECT document_id, text, embedding FROM document_chunks
+                        WHERE user_id = :u AND embedding_model = :m
+                    )
+                    SELECT document_id, text,
+                           1 - (embedding <=> CAST(CAST(:v AS text) AS vector)) AS sim
+                    FROM mine ORDER BY embedding <=> CAST(CAST(:v AS text) AS vector) LIMIT :k
+                    """
+                ),
+                {"u": user_id, "m": embedding_model, "v": vector_literal(vector), "k": k},
+            )
+        ).all()
+        return [DocumentHit(r.document_id, r.text, float(r.sim)) for r in rows]
+
+    async def indexed_documents(self, user_id: uuid.UUID, embedding_model: str) -> set[uuid.UUID]:
+        rows = await self._s.execute(
+            text(
+                "SELECT DISTINCT document_id FROM document_chunks "
+                "WHERE user_id = :u AND embedding_model = :m"
+            ),
+            {"u": user_id, "m": embedding_model},
+        )
+        return {r.document_id for r in rows}
+
+    async def count(self, user_id: uuid.UUID, document_id: uuid.UUID) -> int:
+        n = await self._s.scalar(
+            text("SELECT count(*) FROM document_chunks WHERE user_id = :u AND document_id = :d"),
+            {"u": user_id, "d": document_id},
+        )
+        return int(n or 0)
 
 
 class SqlFingerprintRepository:

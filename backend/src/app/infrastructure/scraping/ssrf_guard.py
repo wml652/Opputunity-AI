@@ -14,7 +14,7 @@ import socket
 from collections.abc import Awaitable, Callable, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
-from app.domain.shared.errors import UnsafeUrlError
+from app.domain.shared.errors import DnsResolutionError, UnsafeUrlError
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 

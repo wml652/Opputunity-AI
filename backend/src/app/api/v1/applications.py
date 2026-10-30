@@ -16,6 +16,7 @@ from app.api.v1.discovery import OpportunityOut
 from app.application.essay.synthesis import EssayRequest
 from app.domain.applications.filling import ApplicationField, Checkpoint, PendingQuestion
 from app.domain.applications.models import Application, Transition
+from app.domain.applications.verification import FinalVerification
 from app.domain.essay.synthesis import EssayDraft
 from app.domain.notification.models import Notification, NotificationChannel
 from app.domain.notification.signatures import verify_meta_signature, verify_twilio_signature
@@ -57,6 +58,7 @@ class FieldOut(BaseModel):
     confidence: float
     essay_draft_id: uuid.UUID | None
     user_edited: bool
+    evidence: str | None = None
 
     @staticmethod
     def of(f: ApplicationField) -> FieldOut:
@@ -72,6 +74,7 @@ class FieldOut(BaseModel):
             confidence=round(f.confidence, 4),
             essay_draft_id=f.essay_draft_id,
             user_edited=f.user_edited,
+            evidence=f.evidence,
         )
 
 
@@ -364,6 +367,137 @@ async def checkpoint_screenshot(
     checkpoint_id: uuid.UUID, user_id: CurrentUserId, container: Container
 ) -> Response:
     png = await container.applications.screenshot.execute(user_id, checkpoint_id)
+    return Response(
+        content=png, media_type="image/png", headers={"Cache-Control": "private, no-store"}
+    )
+
+
+# ---- final verification gate (M5) ---------------------------------------------------------------
+
+
+class VerificationRecordOut(BaseModel):
+    id: uuid.UUID
+    outcome: str
+    preview_hash_seen: str
+    approved_preview_hash: str | None
+    observed_hash: str | None
+    edited_fields: list[str]
+    mismatches: list[dict[str, str]]
+    approved_at: datetime | None
+    rejected_at: datetime | None
+    reject_reason: str | None
+    submitted_at: datetime | None
+    final_url: str | None
+    error: str | None
+    has_receipt: bool
+    created_at: datetime
+
+    @staticmethod
+    def of(v: FinalVerification) -> VerificationRecordOut:
+        return VerificationRecordOut(
+            id=v.id,
+            outcome=v.outcome.value,
+            preview_hash_seen=v.preview_hash_seen,
+            approved_preview_hash=v.approved_preview_hash,
+            observed_hash=v.observed_hash,
+            edited_fields=v.edited_fields,
+            mismatches=v.mismatches,
+            approved_at=v.approved_at,
+            rejected_at=v.rejected_at,
+            reject_reason=v.reject_reason,
+            submitted_at=v.submitted_at,
+            final_url=v.final_url,
+            error=v.error,
+            has_receipt=v.has_receipt,
+            created_at=v.created_at,
+        )
+
+
+class VerificationOut(BaseModel):
+    application: ApplicationOut
+    opportunity: OpportunityOut
+    fields: list[FieldOut]
+    drafts: list[DraftOut]
+    checkpoint: CheckpointOut | None
+    preview_hash: str
+    latest: VerificationRecordOut | None
+    receipt_text: str | None
+
+
+class ApproveIn(BaseModel):
+    preview_hash: str = Field(min_length=64, max_length=64)
+    edits: dict[str, str] = Field(default_factory=dict, max_length=200)
+
+
+class RejectIn(BaseModel):
+    preview_hash: str = Field(default="", max_length=64)
+    reason: str = Field(default="", max_length=500)
+
+
+class BatchIn(BaseModel):
+    limit: int = Field(default=5, ge=1, le=25)
+
+
+class BatchOut(BaseModel):
+    started: list[uuid.UUID]
+    skipped_no_portal: int
+
+
+@router.post(
+    "/applications/batch-prepare", response_model=BatchOut, status_code=status.HTTP_202_ACCEPTED
+)
+async def batch_prepare(body: BatchIn, user_id: CurrentUserId, container: Container) -> BatchOut:
+    """Fill the top-N queued applications up to the final OK gate. Never submits."""
+    result = await container.applications.batch.execute(user_id, body.limit)
+    return BatchOut(started=result.started, skipped_no_portal=result.skipped_no_portal)
+
+
+@router.get("/applications/{application_id}/verification", response_model=VerificationOut)
+async def verification(
+    application_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> VerificationOut:
+    v = await container.applications.verification.execute(user_id, application_id)
+    return VerificationOut(
+        application=ApplicationOut.of(v.application),
+        opportunity=OpportunityOut.of(v.opportunity),
+        fields=[FieldOut.of(f) for f in v.fields],
+        drafts=[DraftOut.of(d) for d in v.drafts],
+        checkpoint=CheckpointOut.of(v.checkpoint) if v.checkpoint else None,
+        preview_hash=v.preview_hash,
+        latest=VerificationRecordOut.of(v.latest) if v.latest else None,
+        receipt_text=v.receipt_text,
+    )
+
+
+@router.post(
+    "/applications/{application_id}/approve",
+    response_model=VerificationRecordOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def approve(
+    application_id: uuid.UUID, body: ApproveIn, user_id: CurrentUserId, container: Container
+) -> VerificationRecordOut:
+    record = await container.applications.approve.execute(
+        user_id, application_id, body.preview_hash, body.edits
+    )
+    return VerificationRecordOut.of(record)
+
+
+@router.post("/applications/{application_id}/reject", status_code=status.HTTP_204_NO_CONTENT)
+async def reject(
+    application_id: uuid.UUID, body: RejectIn, user_id: CurrentUserId, container: Container
+) -> Response:
+    await container.applications.reject.execute(
+        user_id, application_id, body.preview_hash, body.reason
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/applications/{application_id}/receipt")
+async def receipt(
+    application_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> Response:
+    png = await container.applications.receipt.execute(user_id, application_id)
     return Response(
         content=png, media_type="image/png", headers={"Cache-Control": "private, no-store"}
     )

@@ -18,11 +18,17 @@ from app.domain.applications.filling import (
     PendingQuestion,
 )
 from app.domain.applications.models import Application, Transition
+from app.domain.applications.verification import FinalVerification, VerificationOutcome
 from app.domain.discovery.models import Opportunity
 from app.domain.essay.synthesis import EssayDraft
 from app.domain.llm.provider import EncryptedSecret
 from app.domain.notification.models import Notification, NotificationChannel, Template
-from app.domain.ports.applications import StoredChannel, StoredCheckpoint, StoredField
+from app.domain.ports.applications import (
+    StoredChannel,
+    StoredCheckpoint,
+    StoredField,
+    StoredReceipt,
+)
 from app.domain.shared.enums import ApplicationState, NotifStatus, QuestionStatus
 from app.infrastructure.db.models import (
     ApplicationCheckpointRow,
@@ -30,6 +36,7 @@ from app.infrastructure.db.models import (
     ApplicationRow,
     ApplicationTransitionRow,
     EssayDraftRow,
+    FinalVerificationRow,
     NotificationChannelRow,
     NotificationRow,
     OpportunityRow,
@@ -117,6 +124,173 @@ class SqlApplicationDetailRepository:
         ).all()
         return [(_app(a), _opp(o)) for a, o in rows]
 
+    async def set_lease(
+        self,
+        user_id: uuid.UUID,
+        application_id: uuid.UUID,
+        owner: str | None,
+        expires_at: datetime | None,
+    ) -> None:
+        await self._s.execute(
+            update(ApplicationRow)
+            .where(ApplicationRow.user_id == user_id, ApplicationRow.id == application_id)
+            .values(lock_owner=owner, lease_expires_at=expires_at)
+        )
+
+    async def past_deadline(
+        self, now: datetime, states: Sequence[ApplicationState]
+    ) -> list[tuple[Application, Opportunity]]:
+        rows = (
+            await self._s.execute(
+                select(ApplicationRow, OpportunityRow)
+                .join(OpportunityRow, OpportunityRow.id == ApplicationRow.opportunity_id)
+                .where(
+                    ApplicationRow.state.in_(list(states)),
+                    ApplicationRow.deadline_at.is_not(None),
+                    ApplicationRow.deadline_at < now,
+                )
+                .limit(500)
+            )
+        ).all()
+        return [(_app(a), _opp(o)) for a, o in rows]
+
+    async def stale_leases(
+        self, now: datetime, states: Sequence[ApplicationState]
+    ) -> list[tuple[Application, Opportunity]]:
+        rows = (
+            await self._s.execute(
+                select(ApplicationRow, OpportunityRow)
+                .join(OpportunityRow, OpportunityRow.id == ApplicationRow.opportunity_id)
+                .where(
+                    ApplicationRow.state.in_(list(states)),
+                    ApplicationRow.lease_expires_at.is_not(None),
+                    ApplicationRow.lease_expires_at < now,
+                )
+                .limit(500)
+            )
+        ).all()
+        return [(_app(a), _opp(o)) for a, o in rows]
+
+
+# ---- final verification -------------------------------------------------------------------------
+
+
+def _verification(r: FinalVerificationRow) -> FinalVerification:
+    return FinalVerification(
+        id=r.id,
+        user_id=r.user_id,
+        application_id=r.application_id,
+        checkpoint_id=r.checkpoint_id,
+        preview_hash_seen=r.preview_hash_seen,
+        approved_preview_hash=r.approved_preview_hash,
+        edited_fields=list(r.edited_fields or []),
+        outcome=VerificationOutcome(r.outcome),
+        created_at=r.created_at,
+        approved_at=r.approved_at,
+        rejected_at=r.rejected_at,
+        reject_reason=r.reject_reason,
+        submitted_at=r.submitted_at,
+        observed_hash=r.observed_hash,
+        final_url=r.final_url,
+        error=r.error,
+        mismatches=list(r.mismatches or []),
+        has_receipt=r.receipt_key is not None,
+    )
+
+
+class SqlFinalVerificationRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    @staticmethod
+    def _values(v: FinalVerification) -> dict[str, Any]:
+        return {
+            "checkpoint_id": v.checkpoint_id,
+            "outcome": v.outcome.value,
+            "preview_hash_seen": v.preview_hash_seen,
+            "approved_preview_hash": v.approved_preview_hash,
+            "observed_hash": v.observed_hash,
+            "edited_fields": v.edited_fields,
+            "mismatches": v.mismatches,
+            "approved_at": v.approved_at,
+            "rejected_at": v.rejected_at,
+            "reject_reason": v.reject_reason,
+            "submitted_at": v.submitted_at,
+            "final_url": v.final_url,
+            "error": v.error,
+        }
+
+    async def add(self, verification: FinalVerification) -> None:
+        self._s.add(
+            FinalVerificationRow(
+                id=verification.id,
+                user_id=verification.user_id,
+                application_id=verification.application_id,
+                created_at=verification.created_at,
+                **self._values(verification),
+            )
+        )
+        await self._s.flush()
+
+    async def update(
+        self, verification: FinalVerification, receipt: StoredReceipt | None = None
+    ) -> None:
+        values = self._values(verification)
+        if receipt is not None:
+            text = receipt.text
+            values |= {
+                "receipt_key": receipt.screenshot_key,
+                "receipt_nonce": receipt.screenshot_nonce,
+                "receipt_key_version": receipt.screenshot_key_version,
+                "receipt_text_ciphertext": text.ciphertext if text else None,
+                "receipt_text_nonce": text.nonce if text else None,
+                "receipt_text_key_version": text.key_version if text else None,
+            }
+        await self._s.execute(
+            update(FinalVerificationRow)
+            .where(
+                FinalVerificationRow.user_id == verification.user_id,
+                FinalVerificationRow.id == verification.id,
+            )
+            .values(**values)
+        )
+
+    async def latest(
+        self, user_id: uuid.UUID, application_id: uuid.UUID
+    ) -> FinalVerification | None:
+        row = await self._s.scalar(
+            select(FinalVerificationRow)
+            .where(
+                FinalVerificationRow.user_id == user_id,
+                FinalVerificationRow.application_id == application_id,
+            )
+            .order_by(FinalVerificationRow.created_at.desc(), FinalVerificationRow.id.desc())
+            .limit(1)
+        )
+        return _verification(row) if row else None
+
+    async def receipt(self, user_id: uuid.UUID, verification_id: uuid.UUID) -> StoredReceipt | None:
+        row = await self._s.scalar(
+            select(FinalVerificationRow).where(
+                FinalVerificationRow.user_id == user_id,
+                FinalVerificationRow.id == verification_id,
+            )
+        )
+        if row is None:
+            return None
+        text = None
+        if (
+            row.receipt_text_ciphertext is not None
+            and row.receipt_text_nonce is not None
+            and row.receipt_text_key_version is not None
+        ):
+            text = EncryptedSecret(
+                ciphertext=row.receipt_text_ciphertext,
+                nonce=row.receipt_text_nonce,
+                key_version=row.receipt_text_key_version,
+            )
+        return StoredReceipt(row.receipt_key, row.receipt_nonce, row.receipt_key_version, text)
+
 
 # ---- fields -------------------------------------------------------------------------------------
 
@@ -143,6 +317,7 @@ class SqlFieldRepository:
             "essay_draft_id": f.essay_draft_id,
             "user_edited": f.user_edited,
             "updated_at": f.updated_at,
+            "evidence": (f.evidence or "")[:1000] or None,
         }
         stmt = pg_insert(ApplicationFieldRow).values(
             id=f.id,
@@ -186,6 +361,7 @@ class SqlFieldRepository:
                     essay_draft_id=r.essay_draft_id,
                     user_edited=r.user_edited,
                     updated_at=r.updated_at,
+                    evidence=r.evidence,
                 ),
                 value=_secret(r.value_ciphertext, r.value_nonce, r.value_key_version),
             )

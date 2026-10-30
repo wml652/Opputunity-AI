@@ -12,6 +12,8 @@ import { cn, formatRelative } from "@/lib/cn";
 import { useAnswerQuestion, useInbox, useStartFilling } from "@/lib/m4-queries";
 import type { InboxAppT, InboxQuestionT } from "@/lib/m4-schemas";
 
+import { VerificationDrawer } from "./verification-drawer";
+
 type Tab = "questions" | "ready" | "blocked";
 
 export function ActionInbox() {
@@ -153,6 +155,7 @@ function QuestionCard({ q }: { q: InboxQuestionT }) {
 
 function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked" }) {
   const start = useStartFilling();
+  const [verifying, setVerifying] = useState<string | null>(null);
   return (
     <Panel
       title={kind === "ready" ? "Awaiting your final verification" : "Blocked: a human must continue"}
@@ -186,9 +189,15 @@ function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked
                     {kind === "blocked" ? (
                       <Button size="sm" onClick={() => start.mutate(a.id)} disabled={start.isPending}>Retry</Button>
                     ) : null}
-                    <Button size="sm" variant={kind === "ready" ? "primary" : "secondary"} asChild>
-                      <Link href={`/applications/${a.id}`}>Review</Link>
-                    </Button>
+                    {kind === "ready" ? (
+                      <Button size="sm" variant="primary" onClick={() => setVerifying(a.id)}>
+                        Verify &amp; submit
+                      </Button>
+                    ) : (
+                      <Button size="sm" asChild>
+                        <Link href={`/applications/${a.id}`}>Review</Link>
+                      </Button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -196,6 +205,7 @@ function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked
           )}
         </tbody>
       </table>
+      <VerificationDrawer id={verifying} onClose={() => setVerifying(null)} />
     </Panel>
   );
 }

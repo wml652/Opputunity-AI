@@ -66,8 +66,11 @@ export function CampaignLauncher({ compact = false, onLaunched }: { compact?: bo
   const [useWebsites, setUseWebsites] = useState(true);
   const [useSearch, setUseSearch] = useState(true);
   const [useLinkedin, setUseLinkedin] = useState(false);
+  const [useLinkedinAuth, setUseLinkedinAuth] = useState(false);
   const [maxPages, setMaxPages] = useState(15);
   const [depth, setDepth] = useState(2);
+  const [autoStage, setAutoStage] = useState(false);
+  const [autoStageLimit, setAutoStageLimit] = useState(5);
   const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(event: FormEvent) {
@@ -82,9 +85,12 @@ export function CampaignLauncher({ compact = false, onLaunched }: { compact?: bo
         use_websites: useWebsites,
         use_search: useSearch,
         use_linkedin: useLinkedin,
+        use_linkedin_auth: useLinkedinAuth,
         max_pages_per_site: maxPages,
         max_depth: depth,
         home_country: country.trim() || null,
+        auto_stage: autoStage,
+        auto_stage_limit: autoStageLimit,
       });
       onLaunched?.(campaign.id);
     } catch (err) {
@@ -127,6 +133,31 @@ export function CampaignLauncher({ compact = false, onLaunched }: { compact?: bo
           <Toggle label="Websites" hint="Crawl the target sites (Playwright)" checked={useWebsites} onChange={setUseWebsites} />
           <Toggle label="Web search" hint="keywords x scope queries" checked={useSearch} onChange={setUseSearch} />
           <Toggle label="LinkedIn public" hint="Guest job listings, rate-limited" checked={useLinkedin} onChange={setUseLinkedin} />
+          <Toggle
+            label="LinkedIn (signed in)"
+            hint="Opt-in; connect it in Settings > Search & Sessions; daily cap applies"
+            checked={useLinkedinAuth}
+            onChange={setUseLinkedinAuth}
+          />
+          <Toggle
+            label="Auto-stage eligible opportunities up to final OK gate"
+            hint={`Fills the ${autoStageLimit} closest-deadline eligible applications; never submits`}
+            checked={autoStage}
+            onChange={setAutoStage}
+          />
+          {autoStage && !compact ? (
+            <Field id="auto_stage_limit" label="Auto-stage limit">
+              <Input
+                id="auto_stage_limit"
+                type="number"
+                min={1}
+                max={25}
+                value={autoStageLimit}
+                onChange={(e) => setAutoStageLimit(Math.min(25, Math.max(1, Number(e.target.value) || 1)))}
+                className="w-16 font-mono text-xs"
+              />
+            </Field>
+          ) : null}
         </div>
         <div className={cn("flex items-end gap-2", compact ? "col-span-1" : "col-span-2")}>
           {!compact ? (

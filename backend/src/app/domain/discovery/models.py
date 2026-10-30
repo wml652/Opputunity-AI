@@ -57,6 +57,10 @@ COUNTER_KEYS = (
     "pages_skipped",
     "pages_retried",
     "adapted",
+    "bot_challenges",
+    "hubs_harvested",
+    "cards_harvested",
+    "details_queued",
 )
 
 
@@ -68,9 +72,17 @@ def empty_counters() -> dict[str, int]:
 class CampaignSettings:
     max_pages_per_site: int = 15
     max_depth: int = 2
-    search_results_per_query: int = 5
-    max_search_pages: int = 20
-    home_country: str | None = None  # used for LOCAL scope queries
+    search_results_per_query: int = 8
+    max_search_pages: int = 30
+    home_country: str | None = None  # LOCAL scope; falls back to the profile's residence
+    max_search_queries: int = 8
+    # Hub/listing pages: detail links followed per hub, and across the whole campaign.
+    max_details_per_hub: int = 12
+    max_detail_pages: int = 60
+    extraction_workers: int = 2  # concurrent extraction + eligibility consumers
+    # Opt-in: after the campaign, prepare the top-N queued applications up to the final OK gate.
+    auto_stage: bool = False
+    auto_stage_limit: int = 5
 
     def validate(self) -> None:
         if not 1 <= self.max_pages_per_site <= 100:
@@ -81,6 +93,16 @@ class CampaignSettings:
             raise ValidationError("search_results_per_query must be 1-20")
         if not 1 <= self.max_search_pages <= 100:
             raise ValidationError("max_search_pages must be 1-100")
+        if not 1 <= self.max_search_queries <= 20:
+            raise ValidationError("max_search_queries must be 1-20")
+        if not 0 <= self.max_details_per_hub <= 50:
+            raise ValidationError("max_details_per_hub must be 0-50")
+        if not 0 <= self.max_detail_pages <= 300:
+            raise ValidationError("max_detail_pages must be 0-300")
+        if not 1 <= self.extraction_workers <= 4:
+            raise ValidationError("extraction_workers must be 1-4")
+        if not 1 <= self.auto_stage_limit <= 25:
+            raise ValidationError("auto_stage_limit must be 1-25")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +111,12 @@ class CampaignSettings:
             "search_results_per_query": self.search_results_per_query,
             "max_search_pages": self.max_search_pages,
             "home_country": self.home_country,
+            "max_search_queries": self.max_search_queries,
+            "max_details_per_hub": self.max_details_per_hub,
+            "max_detail_pages": self.max_detail_pages,
+            "extraction_workers": self.extraction_workers,
+            "auto_stage": self.auto_stage,
+            "auto_stage_limit": self.auto_stage_limit,
         }
 
     @staticmethod
@@ -142,18 +170,45 @@ def clean_keywords(raw: list[str]) -> list[str]:
     return list(seen.values())
 
 
-def build_search_queries(keywords: list[str], scope: Scope, home_country: str | None) -> list[str]:
-    """keywords x scope. LOCAL pins the student's country; INTERNATIONAL looks abroad / remote;
-    BOTH runs both variants. Queries ask for open calls with deadlines."""
-    queries: list[str] = []
-    year = datetime.now(UTC).year
+def build_search_queries(
+    keywords: list[str],
+    scope: Scope,
+    home_country: str | None,
+    *,
+    limit: int = 8,
+    year: int | None = None,
+) -> list[str]:
+    """Diverse, high-signal queries per keyword: direct calls for applications plus official
+    portal queries. LOCAL pins the student's country and is skipped (never a literal "local")
+    when no country is known; INTERNATIONAL looks for programmes open to international
+    applicants. Keywords are interleaved so the `limit` covers every keyword."""
+    year = year or datetime.now(UTC).year
+    span = f"{year} {year + 1}"
+    country = (home_country or "").strip() or None
+    per_keyword: list[list[str]] = []
     for kw in keywords:
-        if scope in (Scope.LOCAL, Scope.BOTH):
-            where = home_country or "local"
-            queries.append(f'"{kw}" {where} {year} application deadline')
+        variants: list[str] = []
+        if scope in (Scope.LOCAL, Scope.BOTH) and country:
+            variants += [
+                f"{kw} {country} {span} apply",
+                f"{kw} in {country} application deadline {year}",
+                f'{kw} {country} "call for applications" {year}',
+            ]
         if scope in (Scope.INTERNATIONAL, Scope.BOTH):
-            queries.append(f'"{kw}" international students {year} apply deadline')
-    return list(dict.fromkeys(queries))
+            variants += [
+                f"{kw} for international students {span} apply",
+                f'{kw} "call for applications" {span} deadline',
+                f"{kw} {year} official application portal",
+            ]
+        if not variants:  # LOCAL without a known country: still search, just not localized
+            variants = [f"{kw} {span} apply", f"{kw} application deadline {year}"]
+        per_keyword.append(variants)
+    queries: list[str] = []
+    for i in range(max((len(v) for v in per_keyword), default=0)):
+        for variants in per_keyword:
+            if i < len(variants):
+                queries.append(variants[i])
+    return list(dict.fromkeys(queries))[:limit]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +222,7 @@ class FetchedPage:
     blocked_requests: int = 0  # subresources/redirects the browser was prevented from loading
     trace: list[dict[str, Any]] = field(default_factory=list)  # flight-recorder steps
     strategy: dict[str, Any] = field(default_factory=dict)  # FetchStrategy actually used
+    screenshot: bytes | None = None  # captured only for text-sparse pages (vision parsing)
 
 
 @dataclass(slots=True)

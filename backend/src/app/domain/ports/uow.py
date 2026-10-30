@@ -10,15 +10,18 @@ from app.domain.ports.applications import (
     ICheckpointRepository,
     IEssayDraftRepository,
     IFieldRepository,
+    IFinalVerificationRepository,
     INotificationRepository,
     IQuestionRepository,
 )
 from app.domain.ports.discovery import (
     IApplicationRepository,
+    IBrowserSessionRepository,
     ICampaignRepository,
     ICrawledPageRepository,
     IOpportunityRepository,
     IPlaybookRepository,
+    ISearchCredentialRepository,
     IVerdictRepository,
 )
 from app.domain.ports.repositories import (
@@ -30,6 +33,7 @@ from app.domain.ports.repositories import (
     IUserRepository,
 )
 from app.domain.ports.vault import (
+    IDocumentChunkRepository,
     IDocumentRepository,
     IEssayRepository,
     IFingerprintRepository,
@@ -91,6 +95,18 @@ class IUnitOfWork(Protocol):
 
     @property
     def playbooks(self) -> IPlaybookRepository: ...
+
+    @property
+    def browser_sessions(self) -> IBrowserSessionRepository: ...
+
+    @property
+    def search_credentials(self) -> ISearchCredentialRepository: ...
+
+    @property
+    def verifications(self) -> IFinalVerificationRepository: ...
+
+    @property
+    def document_chunks(self) -> IDocumentChunkRepository: ...
 
     @property
     def app_details(self) -> IApplicationDetailRepository: ...

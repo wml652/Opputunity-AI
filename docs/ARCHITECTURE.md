@@ -653,3 +653,115 @@ browser TLS fingerprint (`route.fetch` caused 403s).
 **Gate:** `tests/integration/test_application_filler.py` runs against the 3-step
 `tests/fixtures/fake_portal`. It covers pause → Inbox answer → memory → resume with ledger replay
 after a wipe → stop before Submit → a second portal auto-answered from memory.
+
+### Discovery v2: audit fixes and the streaming hub harvester (complete)
+
+**Pipeline** (`application/discovery/runner.py`, `CampaignRun`): producer (sources, then hub
+detail links) → bounded `asyncio.Queue` → 2–4 consumers (extract → eligibility → queue).
+- Verdicts and queued applications stream *during* the crawl.
+- Campaign phases are `CRAWLING` (everything runs), `EXTRACTING` (queue draining) and
+  `COMPLETED`.
+- One failing page, window or source never aborts the run.
+- Cancellation: a watcher polls the status every 0.5 s and cancels the run task, with a
+  checkpoint before and after every fetch and every extraction window. It takes effect in < 2 s.
+
+**Listing pages:** `infrastructure/scraping/segmenter.py` finds repeated card / table structures
+and keeps `[Title](URL) | Deadline | snippet` together. trafilatura stays for prose.
+- **LISTING hubs** with ≥ 3 followable cards are harvested deterministically (`HUB_HARVEST` trace
+  step). Their top detail links are fetched, including off-site official pages behind
+  listicles, and the LLM runs on those detail pages. Links are scored by `detail_link_score`,
+  which penalizes `/page/N>2`, taxonomy and social links.
+- **MIXED** pages (prose plus cards) are extracted *and* harvested.
+
+**Extraction:**
+- Compact schema.
+- No item caps; a visible `truncated_windows` warning beyond the window budget.
+- Per-window error isolation.
+- Fuzzy title/organization merging that works without an embedding model.
+- `llm_timeout_seconds = 180` with 1 retry.
+- An optional user-typed `extraction_model` (blank means the chat model is used).
+
+**Failure memory:**
+- `domain_playbooks` are saved immediately, in sorted domain order (deadlock-free), including
+  escalated strategies after failures.
+- A timeout falls back to plain HTTP within the same attempt.
+- Error codes are precise: `dns_error`, `tunnel_connect_error`, `bot_challenge` and
+  `ssrf_blocked` are distinct.
+
+**Bot challenges:**
+- A challenged page gets `BLOCKED_BOT_CHALLENGE` and is remembered per domain; later campaigns
+  skip the domain.
+- The user can pass the challenge once in a visible browser (Settings › Search & Sessions, or
+  the Crawl Inspector). Its encrypted `storage_state` is then used for that domain.
+- Automation never solves challenges.
+
+**Data and keys:**
+- Failed and empty pages are never dropped: the content-hash uniqueness is a partial index over
+  DISTILLED/EXTRACTED pages only.
+- Per-user Tavily/Brave keys are encrypted (`search_credentials`).
+- `EgressProxy.stop()` tracks and aborts every tunnel; shutdown is bounded at about 1.5 s.
+
+### M5: Final verification gate, submission, LinkedIn auth, hardening (complete)
+
+**Gate** (`application/applications/submission.py`, `domain/applications/verification.py`):
+- `preview_hash = sha256(canonical (step, field, value))`.
+- `POST /applications/{id}/approve {preview_hash, edits}` does the following in order:
+  1. rejects a stale hash with 409;
+  2. applies the edits;
+  3. records a `final_verifications` row bound to the approved hash;
+  4. moves the application to `SUBMIT_APPROVED`.
+- `RunSubmission` replays every step with the approved values and reads each control back from
+  the page. It clicks Submit only if the observed hash equals the approved hash; any mismatch
+  re-stages the application to `AWAITING_FINAL_VERIFICATION`.
+- Receipts: a full-page screenshot and the confirmation text are stored encrypted.
+- Idempotent: a second approval or run never submits twice. Failures go to `SUBMISSION_FAILED`
+  and are never retried automatically.
+- Reject moves the application to `CANCELLED`.
+
+**Maintenance:**
+- `ReapLeases`: a dead worker's fill run becomes `BLOCKED_NEEDS_HUMAN`; an interrupted submit
+  becomes `SUBMISSION_FAILED` with a "check the portal" note.
+- `SweepDeadlines` expires past-deadline applications, except while a submit is in flight.
+- These run in the API lifespan (in-process mode) and as arq cron jobs on the `system` queue.
+
+**LinkedIn (opt-in):**
+- Requires ToS acknowledgement and a headful sign-in.
+- The session is encrypted, with a per-day action cap (`browser_sessions.daily_action_cap`).
+- `LinkedInAuthenticatedAdapter` is read-only.
+
+**Hardening:**
+- API: CSP `default-src 'none'`, frame/sniff/permissions/CORP headers, and HSTS when cookies are
+  secure.
+- Console: CSP and security headers.
+- `backend/Dockerfile.api`, `backend/Dockerfile.worker` (Playwright Chromium) and
+  `frontend/Dockerfile` (Next standalone).
+
+**UI:**
+- Verification Drawer (Inbox › Ready for OK, and the application inspector): a zoomable
+  screenshot, editable fields with source tags and diff highlights, the preview hash, **OK —
+  Verify & Submit**, **Reject / Cancel**, and the receipt.
+
+### M6: In-page RAG, RPM pacing, document parsing, evidence RAG, batch staging
+
+- **In-page RAG** (`domain/discovery/rag_filter.py`): a long distilled page is split into
+  semantic sections and scored:
+  - Stage A: BM25 + opportunity signals + embedding cosine.
+  - Stage B (optional): the user's `rerank_model` (`/ranking`).
+  The lead section and the relevant sections are kept. When the result fits in 6000 chars it is
+  extracted in a single LLM call. Trace step: `RAG_FILTER` (`chars_saved_pct`), shown in the
+  Crawl Inspector.
+- **Pacing:** one sliding-window limiter per provider host + key (`rpm_limit`, default 36),
+  acquired before every attempt, including retries.
+- **Documents:**
+  - PDF opportunity URLs go through `PdfLayoutParser` (pypdf; wide-gap rows become pipe tables).
+  - Sparse or image-only pages and PDFs go to the vision model only if the user set
+    `vision_model`.
+- **Evidence RAG:** uploaded documents are chunked into `document_chunks` (vector(1024), RLS).
+  - Before a required custom question pauses, `ProfileEvidenceRetriever` searches the
+    documents, essays and memory.
+  - The snippets are PII-redacted before the model sees them.
+  - The answer is auto-filled only at combined confidence ≥ 0.85 (`DOCUMENT`/`ESSAY`/`MEMORY`),
+    with the snippet stored as field `evidence`.
+- **Batch auto-stage:** `POST /applications/batch-prepare`, the Pipeline queue button, or the
+  campaign `auto_stage` option. It fills the top-N QUEUED applications by deadline up to the
+  final OK gate, with bounded parallelism (`MAX_PARALLEL_FILLS`). It never submits.

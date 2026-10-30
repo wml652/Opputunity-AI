@@ -108,7 +108,158 @@ def long_page() -> str:
     return _layout("Scholarship deadlines calendar", f"<article>{filler}{middle}{filler}</article>")
 
 
+# ---- discovery v2 fixtures: hub/listing harvest, bot challenge, failed-page dedupe ------------
+
+OFFSITE_BASE = ""  # set by tests: an "official" programme host behind a listicle card
+HUB_DEALS = [f"zeta-{i}-research-internship-2099" for i in range(1, 9)]
+
+
+def _detail(slug: str, title: str) -> str:
+    fields = {
+        "Title": title,
+        "Organization": f"{title.split()[0]} Institute",
+        "Type": "INTERNSHIP",
+        "Deadline": "2099-05-05",
+        "Degree": "BACHELOR",
+        "Apply": f"/apply/{slug}",
+    }
+    lines = "".join(f"<p>{k}: {v}</p>" for k, v in fields.items())
+    prose = "<p>This programme funds undergraduate research placements every summer.</p>" * 3
+    return _layout(title, f"<article><h1>{title}</h1>{lines}{prose}</article>")
+
+
+def hub_page() -> str:
+    cards = "".join(
+        f"<article class='card'><h3><a href='/deal/{slug}'>Zeta {i} Research Internship 2099"
+        f"</a></h3><span class='date'>Deadline: May 5, 2099</span>"
+        f"<p>Funded summer research placement number {i} for undergraduates.</p></article>"
+        for i, slug in enumerate(HUB_DEALS, start=1)
+    )
+    offsite = (
+        f"<article class='card'><h3><a href='{OFFSITE_BASE}/official/eta-fellowship-2099'>"
+        "Eta Global Research Fellowship 2099</a></h3><span class='date'>Deadline: June 1, 2099"
+        "</span><p>Official programme page of the Eta Foundation.</p></article>"
+        if OFFSITE_BASE
+        else ""
+    )
+    clutter = (
+        "<div class='pages'><a href='/hub/page/2/'>2</a> <a href='/hub/page/38/'>38</a></div>"
+        "<a href='/tag/usa/'>USA research internships tag</a>"
+    )
+    return _layout(
+        "Research internships hub",
+        f"<main><h1>Latest research internships</h1><section class='grid'>{cards}{offsite}"
+        f"</section>{clutter}</main>",
+    )
+
+
+def many_page() -> str:
+    blocks = "".join(
+        f"<section><h2>Item {i}</h2><p>Title: Omicron Grant {i:02d}</p>"
+        f"<p>Organization: Omicron Trust {i:02d}</p><p>Type: SCHOLARSHIP</p>"
+        f"<p>Deadline: 2099-09-{(i % 27) + 1:02d}</p><p>Degree: BACHELOR</p></section>"
+        for i in range(1, 31)
+    )
+    return _layout("Omicron grants list", f"<article>{blocks}</article>")
+
+
+def long_detail_page() -> str:
+    """One opportunity buried in ~20k characters of navigation, related posts, comments and
+    newsletter boxes (what real detail pages look like)."""
+    nav = "".join(
+        f"<li><a href='/cat/{i}'>Category {i} news and updates</a></li>" for i in range(60)
+    )
+    related = "".join(
+        f"<h3>Related post {i}</h3><p>Read our travel diary number {i} about city life, food "
+        f"markets and weekend trips that readers enjoyed this season.</p>"
+        for i in range(40)
+    )
+    comments = "".join(
+        f"<h4>Comment by reader{i}</h4><p>Great post, thanks for sharing! Leave a reply below "
+        f"and subscribe to our newsletter for more.</p>"
+        for i in range(50)
+    )
+    body = (
+        f"<nav><ul>{nav}</ul></nav>"
+        "<article><h1>Rho Global Research Fellowship 2099</h1>"
+        "<h2>Overview</h2><p>Title: Rho Global Research Fellowship</p>"
+        "<p>Organization: Rho Institute</p><p>Type: RESEARCH</p>"
+        "<h2>Eligibility</h2><p>Undergraduate students with a minimum GPA of 3.0 may apply. "
+        "Degree: BACHELOR</p>"
+        "<h2>Deadline and how to apply</h2><p>Deadline: 2099-04-04. Apply online through the "
+        "application portal; the fellowship provides a monthly stipend and full funding.</p>"
+        "</article>"
+        f"<section><h2>You may also like</h2>{related}</section>"
+        f"<section><h2>Comments</h2>{comments}</section>"
+        "<footer><p>Subscribe to our newsletter. Follow us on social media. Cookie policy. "
+        "Privacy policy. All rights reserved.</p></footer>"
+    )
+    return _layout("Rho Global Research Fellowship 2099", body)
+
+
+def pdf_call() -> bytes:
+    from tests.fixtures import make_pdf
+
+    return make_pdf(
+        [
+            "Call for applications",
+            "Title: Sigma Summer Research Programme",
+            "Organization: Sigma University",
+            "Type: RESEARCH",
+            "Deadline: 2099-08-08",
+            "Degree: BACHELOR",
+            "Undergraduate students worldwide are invited to apply for a funded summer placement.",
+        ]
+    )
+
+
 def render(path: str, query: str) -> tuple[int, dict[str, str], str]:
+    if path == "/long-detail":
+        return 200, {"content-type": "text/html"}, long_detail_page()
+    if path == "/hub":
+        return 200, {"content-type": "text/html"}, hub_page()
+    if path.startswith("/deal/"):
+        slug = path.removeprefix("/deal/")
+        if slug not in HUB_DEALS:
+            return 404, {"content-type": "text/html"}, _layout("Not found", "<p>missing</p>")
+        n = slug.split("-")[1]
+        return 200, {"content-type": "text/html"}, _detail(slug, f"Zeta {n} Research Internship")
+    if path == "/challenge":
+        return (
+            403,
+            {"content-type": "text/html", "cf-mitigated": "challenge", "server": "cloudflare"},
+            "<html><head><title>Just a moment...</title></head><body>"
+            "<div id='challenge-platform'>Checking your browser before accessing.</div>"
+            "</body></html>",
+        )
+    if path in ("/empty-a", "/empty-b"):
+        return 200, {"content-type": "text/html"}, "<html><body><p>x</p></body></html>"
+    if path == "/many":
+        return 200, {"content-type": "text/html"}, many_page()
+    if path == "/windowed":
+        # Distinct paragraphs (trafilatura de-duplicates identical ones) so the page really
+        # spans several extraction windows.
+        def part(tag: str) -> str:
+            return "".join(
+                f"<p>Background note {tag}{j}: funding cycle {j} keeps eligibility rule {j}.</p>"
+                for j in range(110)
+            )
+
+        body = (
+            f"<section><p>Title: Pi Grant One</p><p>Organization: Pi Trust</p>"
+            f"<p>Deadline: 2099-01-01</p></section>{part('a')}"
+            f"<section><p>SLOW-WINDOW marker</p>{part('b')}</section>"
+            f"<section><p>Title: Pi Grant Three</p><p>Organization: Pi Third Trust</p>"
+            f"<p>Deadline: 2099-03-03</p></section>"
+        )
+        return (
+            200,
+            {"content-type": "text/html"},
+            _layout("Pi grants", f"<article>{body}</article>"),
+        )
+    if path == "/slow":
+        body = "<p>Title: Sigma Slow Grant</p><p>SLOW-PAGE</p>" + "<p>Long text here.</p>" * 20
+        return 200, {"content-type": "text/html"}, _layout("Sigma", f"<article>{body}</article>")
     if path == "/long-blog":
         return 200, {"content-type": "text/html"}, long_page()
     if path.startswith("/blocked-once/"):
@@ -199,8 +350,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parts = urlsplit(self.path)
         _Handler.hits.append(self.path)
-        status, headers, body = render(parts.path, parts.query)
-        data = body.encode()
+        if parts.path == "/call-for-applications.pdf":
+            status, headers, data = 200, {"content-type": "application/pdf"}, pdf_call()
+        else:
+            status, headers, body = render(parts.path, parts.query)
+            data = body.encode()
         self.send_response(status)
         for k, v in headers.items():
             self.send_header(k, v)

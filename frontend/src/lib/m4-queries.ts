@@ -14,6 +14,8 @@ import {
   inboxSchema,
   notificationSettingsSchema,
   pageDetailSchema,
+  verificationRecordSchema,
+  verificationSchema,
 } from "./m4-schemas";
 import { keys } from "./queries";
 
@@ -72,6 +74,27 @@ export function useStartFilling() {
   return useMutation({
     mutationFn: (applicationId: string) =>
       api(`/api/v1/applications/${applicationId}/start`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+}
+
+const batchResultSchema = z.object({
+  started: z.array(z.string().uuid()),
+  skipped_no_portal: z.number().int(),
+});
+export type BatchResult = z.infer<typeof batchResultSchema>;
+
+/** Fill the top-N QUEUED applications (closest deadline first) up to the final OK gate. Never
+ * submits: each one still needs the human "OK - Verify & Submit". */
+export function useBatchPrepare() {
+  const invalidate = useInvalidateApplications();
+  return useMutation({
+    mutationFn: (limit: number) =>
+      api("/api/v1/applications/batch-prepare", {
+        method: "POST",
+        body: { limit },
+        schema: batchResultSchema,
+      }),
     onSuccess: invalidate,
   });
 }
@@ -155,4 +178,39 @@ export function useTestNotification() {
   return useNotificationMutation(() =>
     api("/api/v1/notifications/test", { method: "POST", schema: z.array(deliverySchema) }),
   );
+}
+
+// ---- Final verification gate (M5) -------------------------------------------------------------
+
+export function useVerification(id: string | null) {
+  return useQuery({
+    queryKey: ["m4", "verification", id ?? "none"],
+    queryFn: () => api(`/api/v1/applications/${id}/verification`, { schema: verificationSchema }),
+    enabled: id !== null,
+  });
+}
+
+export function useApprove() {
+  const invalidate = useInvalidateApplications();
+  return useMutation({
+    mutationFn: (v: { id: string; preview_hash: string; edits: Record<string, string> }) =>
+      api(`/api/v1/applications/${v.id}/approve`, {
+        method: "POST",
+        body: { preview_hash: v.preview_hash, edits: v.edits },
+        schema: verificationRecordSchema,
+      }),
+    onSettled: invalidate,
+  });
+}
+
+export function useReject() {
+  const invalidate = useInvalidateApplications();
+  return useMutation({
+    mutationFn: (v: { id: string; preview_hash: string; reason: string }) =>
+      api(`/api/v1/applications/${v.id}/reject`, {
+        method: "POST",
+        body: { preview_hash: v.preview_hash, reason: v.reason },
+      }),
+    onSettled: invalidate,
+  });
 }

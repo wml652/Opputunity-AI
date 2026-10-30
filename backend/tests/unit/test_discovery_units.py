@@ -64,12 +64,19 @@ def test_deadline_is_end_of_day_utc() -> None:
 
 
 def test_search_queries_follow_scope() -> None:
-    local = build_search_queries(["internships"], Scope.LOCAL, "Pakistan")
-    intl = build_search_queries(["internships"], Scope.INTERNATIONAL, "Pakistan")
-    both = build_search_queries(["internships", "research"], Scope.BOTH, None)
-    assert len(local) == 1 and "Pakistan" in local[0]
-    assert len(intl) == 1 and "international" in intl[0]
-    assert len(both) == 4
+    local = build_search_queries(["internships"], Scope.LOCAL, "Pakistan", year=2026)
+    intl = build_search_queries(["internships"], Scope.INTERNATIONAL, "Pakistan", year=2026)
+    both = build_search_queries(["internships", "research"], Scope.BOTH, None, year=2026)
+    assert len(local) == 3 and all("Pakistan" in q for q in local)
+    assert "internships Pakistan 2026 2027 apply" in local
+    assert len(intl) == 3 and any("international students" in q for q in intl)
+    assert any("official application portal" in q for q in intl)
+    # Never the literal word "local"; without a country BOTH only runs the international set.
+    everything = local + intl + both + build_search_queries(["x"], Scope.LOCAL, None)
+    assert not any(" local " in f" {q} " for q in everything)
+    assert len(both) == 6 and both[0].startswith("internships") and both[1].startswith("research")
+    capped = build_search_queries(["a", "b", "c"], Scope.BOTH, "Pakistan", limit=5)
+    assert len(capped) == 5 and {q.split()[0] for q in capped} == {"a", "b", "c"}
 
 
 def test_keyword_and_settings_validation() -> None:
@@ -117,7 +124,8 @@ def test_link_scoring_and_same_site() -> None:
     kws = ["undergraduate scholarship"]
     assert link_score("https://p.org/opp/alpha", "Alpha scholarship details", kws) > 0
     assert link_score("https://p.org/scholarships?page=2", "Next page", kws) > 0
-    assert link_score("https://p.org/about", "About us", kws) == 0
+    assert link_score("https://p.org/about", "About us", kws) <= 0
+    assert link_score("https://p.org/category/x/page/38/", "38", kws) < 0
     assert same_site("https://www.p.org/x", "https://p.org/")
     assert same_site("https://jobs.p.org/x", "https://p.org/")
     assert not same_site("https://evil.org/p.org", "https://p.org/")

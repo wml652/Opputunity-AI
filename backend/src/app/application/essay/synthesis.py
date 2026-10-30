@@ -37,11 +37,13 @@ from app.domain.events.models import NewEvent
 from app.domain.ports.llm import ChatMessage
 from app.domain.ports.uow import IUnitOfWorkFactory
 from app.domain.ports.vault import IStylometryAnalyzer
+from app.domain.profile.evidence import redact_pii
 from app.domain.shared.clock import Clock
 from app.domain.shared.enums import EssayStatus
 from app.domain.shared.errors import NotFoundError, ValidationError
 from app.domain.shared.ids import new_uuid7
 
+TOP_K_EVIDENCE = 4
 TOP_K_CHUNKS = 4
 
 
@@ -105,11 +107,24 @@ class SynthesizeEssay:
                 user_id, query, embedder.model_name, TOP_K_CHUNKS
             )
             stored = await uow.profiles.get(user_id)
+            cv_hits = await uow.document_chunks.nearest(
+                user_id, query, embedder.model_name, TOP_K_EVIDENCE
+            )
+            user = await uow.users.get(user_id)
         if fingerprint is None or not chunks:
             raise ValidationError(
                 "add reference essays first: the essay engine writes in YOUR voice"
             )
-        facts = profile_snapshot(stored.profile) if stored else {}
+        facts: dict[str, Any] = dict(profile_snapshot(stored.profile)) if stored else {}
+        pii_values: list[str] = [user.email] if user else []
+        if stored:
+            pii_values.append(stored.profile.full_name)
+            pii_values += [v for v in stored.profile.pii.to_dict().values() if v]
+        evidence = [redact_pii(h.text, [v for v in pii_values if v])[:900] for h in cv_hits]
+        if evidence:
+            # Achievements, projects, courses from the student's own CV / transcript: the essay
+            # may only state facts that appear here or in the profile (critic checks this).
+            facts["cv_evidence"] = evidence
         samples = "\n\n---\n\n".join(text for text, _ in chunks)
         banned = ", ".join(f'"{c}"' for c in CLICHES)
         user_msg = (

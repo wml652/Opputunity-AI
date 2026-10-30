@@ -63,3 +63,10 @@ async def run_campaign(ctx: dict[str, Any], user_id: str, campaign_id: str) -> N
 async def ping(ctx: dict[str, Any], message: str = "pong") -> str:
     log.info("worker.ping", worker_id=ctx.get("worker_id"), message=message)
     return message
+
+
+async def maintenance(ctx: dict[str, Any]) -> dict[str, int]:
+    """Cron (system queue): hand interrupted runs back to the user and expire past deadlines."""
+    reaper: Any = ctx["reap_leases"]
+    deadlines: Any = ctx["sweep_deadlines"]
+    return {"reaped": await reaper.execute(), "expired": await deadlines.execute()}

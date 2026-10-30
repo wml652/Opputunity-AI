@@ -18,14 +18,14 @@ import asyncio
 import contextlib
 from urllib.parse import urlsplit
 
-from app.domain.shared.errors import UnsafeUrlError
+from app.domain.shared.errors import DnsResolutionError, UnsafeUrlError
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.ssrf_guard import SsrfGuard
 
 log = get_logger(__name__)
 
 _MAX_HEADER = 64 * 1024
-STOP_TIMEOUT_S = 2.0
+STOP_TIMEOUT_S = 1.5
 
 
 class EgressProxy:
@@ -34,6 +34,7 @@ class EgressProxy:
         self._server: asyncio.base_events.Server | None = None
         self.port = 0
         self.blocked: list[str] = []
+        self.errors: list[tuple[str, str]] = []  # (url, dns_error|tunnel_connect_error)
         # Every live socket (client and upstream side) and handler task, so `stop()` can
         # force-close tunnels whose peer never sends EOF (otherwise Python 3.12's
         # `Server.wait_closed()` waits on them forever).
@@ -136,6 +137,17 @@ class EgressProxy:
             await writer.drain()
         writer.close()
 
+    async def _gateway_error(self, writer: asyncio.StreamWriter, url: str, kind: str) -> None:
+        """Upstream unreachable (`dns_error` / `tunnel_connect_error`): NOT an SSRF block."""
+        self.errors.append((url, kind))
+        with contextlib.suppress(Exception):
+            writer.write(
+                b"HTTP/1.1 502 Bad Gateway\r\nX-OOTG-Error: " + kind.encode() + b"\r\n"
+                b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            await writer.drain()
+        writer.close()
+
     async def _tunnel(
         self, target: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -146,18 +158,22 @@ class EgressProxy:
             upstream_r, upstream_w = await asyncio.wait_for(
                 asyncio.open_connection(ip, port), timeout=20
             )
+        except DnsResolutionError:
+            await self._gateway_error(writer, url, "dns_error")
+            return
         except UnsafeUrlError as exc:
             await self._deny(writer, url, exc.message)
             return
         except (OSError, TimeoutError):
-            with contextlib.suppress(Exception):
-                writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-                await writer.drain()
-            writer.close()
+            await self._gateway_error(writer, url, "tunnel_connect_error")
             return
-        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        await writer.drain()
-        await _pipe_both(reader, writer, upstream_r, upstream_w)
+        self._track(upstream_w)
+        try:
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await writer.drain()
+            await _pipe_both(reader, writer, upstream_r, upstream_w)
+        finally:
+            self._untrack(upstream_w)
 
     async def _forward(
         self,
@@ -176,11 +192,14 @@ class EgressProxy:
             upstream_r, upstream_w = await asyncio.wait_for(
                 asyncio.open_connection(ip, port), timeout=20
             )
+        except DnsResolutionError:
+            await self._gateway_error(writer, target, "dns_error")
+            return
         except UnsafeUrlError as exc:
             await self._deny(writer, target, exc.message)
             return
         except (OSError, TimeoutError):
-            writer.close()
+            await self._gateway_error(writer, target, "tunnel_connect_error")
             return
         parts = urlsplit(target)
         origin_form = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
@@ -196,13 +215,17 @@ class EgressProxy:
             )
         ]
         headers.append(b"Connection: close")
-        upstream_w.write(
-            f"{method} {origin_form} {version}\r\n".encode("latin-1")
-            + b"\r\n".join(headers)
-            + b"\r\n\r\n"
-        )
-        await upstream_w.drain()
-        await _pipe_both(reader, writer, upstream_r, upstream_w)
+        self._track(upstream_w)
+        try:
+            upstream_w.write(
+                f"{method} {origin_form} {version}\r\n".encode("latin-1")
+                + b"\r\n".join(headers)
+                + b"\r\n\r\n"
+            )
+            await upstream_w.drain()
+            await _pipe_both(reader, writer, upstream_r, upstream_w)
+        finally:
+            self._untrack(upstream_w)
 
 
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:

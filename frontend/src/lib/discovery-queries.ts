@@ -55,9 +55,12 @@ export interface CampaignInput {
   use_websites: boolean;
   use_search: boolean;
   use_linkedin: boolean;
+  use_linkedin_auth?: boolean;
   max_pages_per_site: number;
   max_depth: number;
   home_country: string | null;
+  auto_stage?: boolean;
+  auto_stage_limit?: number;
 }
 
 export function useCreateCampaign() {

@@ -68,6 +68,8 @@ export function useProviders() {
   return useQuery({
     queryKey: keys.providers,
     queryFn: () => api("/api/v1/llm/providers", { schema: z.array(providerConfigSchema) }),
+    // Shared by the telemetry bar, the provider select and the settings page: one request.
+    staleTime: 60_000,
   });
 }
 
@@ -111,7 +113,31 @@ export interface ProviderInput {
   embedding_base_url?: string;
   embedding_model?: string;
   embedding_api_key?: string;
+  extraction_model?: string;
+  rerank_model?: string;
+  rerank_base_url?: string;
+  vision_model?: string;
+  rpm_limit?: number;
   activate?: boolean;
+}
+
+/** Optional per-provider slots editable after creation. "" clears a slot (back to the local
+ * fallback); a model id is only ever what the user typed. */
+export interface ProviderSlotsPatch {
+  extraction_model?: string;
+  rerank_model?: string;
+  rerank_base_url?: string;
+  vision_model?: string;
+  rpm_limit?: number;
+}
+
+export function useUpdateProvider() {
+  const invalidate = useInvalidateLlm();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: ProviderSlotsPatch }) =>
+      api(`/api/v1/llm/providers/${id}`, { method: "PATCH", body, schema: providerConfigSchema }),
+    onSuccess: invalidate,
+  });
 }
 
 export function useCreateProvider() {

@@ -37,11 +37,18 @@ class CampaignIn(BaseModel):
     use_websites: bool = True
     use_search: bool = True
     use_linkedin: bool = False
+    use_linkedin_auth: bool = False
     max_pages_per_site: int = Field(default=15, ge=1, le=100)
     max_depth: int = Field(default=2, ge=0, le=4)
-    search_results_per_query: int = Field(default=5, ge=1, le=20)
-    max_search_pages: int = Field(default=20, ge=1, le=100)
+    search_results_per_query: int = Field(default=8, ge=1, le=20)
+    max_search_pages: int = Field(default=30, ge=1, le=100)
     home_country: str | None = Field(default=None, max_length=100)
+    max_search_queries: int = Field(default=8, ge=1, le=20)
+    max_details_per_hub: int = Field(default=12, ge=0, le=50)
+    max_detail_pages: int = Field(default=60, ge=0, le=300)
+    extraction_workers: int = Field(default=2, ge=1, le=4)
+    auto_stage: bool = False
+    auto_stage_limit: int = Field(default=5, ge=1, le=25)
 
 
 class SourceOut(BaseModel):
@@ -272,12 +279,19 @@ async def create_campaign(
             use_websites=body.use_websites,
             use_search=body.use_search,
             use_linkedin=body.use_linkedin,
+            use_linkedin_auth=body.use_linkedin_auth,
             settings=CampaignSettings(
                 max_pages_per_site=body.max_pages_per_site,
                 max_depth=body.max_depth,
                 search_results_per_query=body.search_results_per_query,
                 max_search_pages=body.max_search_pages,
                 home_country=body.home_country,
+                max_search_queries=body.max_search_queries,
+                max_details_per_hub=body.max_details_per_hub,
+                max_detail_pages=body.max_detail_pages,
+                extraction_workers=body.extraction_workers,
+                auto_stage=body.auto_stage,
+                auto_stage_limit=body.auto_stage_limit,
             ),
         ),
     )

@@ -11,7 +11,9 @@ from typing import Protocol
 from app.domain.essay.models import ReferenceEssay, StyleAnalysis, StyleFingerprint
 from app.domain.llm.provider import EncryptedSecret
 from app.domain.memory.models import KnowledgeQA
+from app.domain.ports.llm import ILLMProvider
 from app.domain.profile.documents import Document, ExtractedText
+from app.domain.profile.evidence import EvidenceSnippet
 from app.domain.profile.models import StudentProfile
 
 
@@ -105,6 +107,35 @@ class IEssayRepository(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class DocumentHit:
+    document_id: uuid.UUID
+    text: str
+    similarity: float
+
+
+class IDocumentChunkRepository(Protocol):
+    async def replace_chunks(
+        self,
+        user_id: uuid.UUID,
+        document_id: uuid.UUID,
+        chunks: Sequence[EmbeddedChunk],
+        embedding_model: str,
+    ) -> None: ...
+
+    async def nearest(
+        self, user_id: uuid.UUID, vector: Sequence[float], embedding_model: str, k: int
+    ) -> builtins.list[DocumentHit]:
+        """The user's document chunks closest to `vector` (exact per-tenant ranking)."""
+        ...
+
+    async def indexed_documents(
+        self, user_id: uuid.UUID, embedding_model: str
+    ) -> set[uuid.UUID]: ...
+
+    async def count(self, user_id: uuid.UUID, document_id: uuid.UUID) -> int: ...
+
+
 class IFingerprintRepository(Protocol):
     async def add(self, fingerprint: StyleFingerprint) -> None: ...
 
@@ -142,4 +173,24 @@ class IMemoryRepository(Protocol):
 
     async def count_by_model(self, user_id: uuid.UUID, embedding_model: str) -> tuple[int, int]:
         """(rows embedded with `embedding_model`, rows embedded with any other model)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceReply:
+    answerable: bool
+    answer: str | None
+    confidence: float  # the model's own confidence in [0, 1]
+    cited: list[int]  # indices into the snippets it was given
+
+
+class IEvidenceAnswerer(Protocol):
+    async def answer(
+        self,
+        llm: ILLMProvider,
+        question: str,
+        options: list[str],
+        snippets: Sequence[EvidenceSnippet],
+    ) -> EvidenceReply:
+        """Answer ONE form question strictly from (already PII-redacted) evidence snippets."""
         ...

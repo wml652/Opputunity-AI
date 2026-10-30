@@ -19,6 +19,7 @@ from app.domain.applications.filling import (
     ResumeState,
 )
 from app.domain.applications.models import Application, Transition
+from app.domain.applications.verification import FinalVerification, SubmitOutcome
 from app.domain.discovery.models import Opportunity
 from app.domain.essay.synthesis import EssayDraft
 from app.domain.llm.provider import EncryptedSecret
@@ -40,9 +41,26 @@ class IFormFiller(Protocol):
         """Fill step by step up to (never clicking) the final Submit."""
         ...
 
+    async def submit(
+        self,
+        portal_url: str,
+        *,
+        approved: dict[str, FieldResolution],
+        approved_hash: str,
+        storage_state: str | None,
+        documents: dict[uuid.UUID, DocumentBlob],
+    ) -> SubmitOutcome:
+        """Replay every step with the APPROVED values, read each control back from the page and
+        click Submit only if the hash of the observed values equals `approved_hash`."""
+        ...
+
 
 class IApplicationRunner(Protocol):
     async def start(self, user_id: uuid.UUID, application_id: uuid.UUID) -> None: ...
+
+    async def submit(self, user_id: uuid.UUID, application_id: uuid.UUID) -> None:
+        """Run the approved submission in the background (one task per application)."""
+        ...
 
 
 class INotifier(Protocol):
@@ -75,6 +93,27 @@ class StoredCheckpoint:
     screenshot_key_version: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class StoredReceipt:
+    screenshot_key: str | None
+    screenshot_nonce: bytes | None
+    screenshot_key_version: int | None
+    text: EncryptedSecret | None
+
+
+class IFinalVerificationRepository(Protocol):
+    async def add(self, verification: FinalVerification) -> None: ...
+    async def update(
+        self, verification: FinalVerification, receipt: StoredReceipt | None = None
+    ) -> None: ...
+    async def latest(
+        self, user_id: uuid.UUID, application_id: uuid.UUID
+    ) -> FinalVerification | None: ...
+    async def receipt(
+        self, user_id: uuid.UUID, verification_id: uuid.UUID
+    ) -> StoredReceipt | None: ...
+
+
 class IApplicationDetailRepository(Protocol):
     async def get(
         self, user_id: uuid.UUID, application_id: uuid.UUID
@@ -88,6 +127,28 @@ class IApplicationDetailRepository(Protocol):
         last_error: str | None = None,
     ) -> bool:
         """Optimistic update; False when another writer changed the row first."""
+        ...
+
+    async def set_lease(
+        self,
+        user_id: uuid.UUID,
+        application_id: uuid.UUID,
+        owner: str | None,
+        expires_at: datetime | None,
+    ) -> None:
+        """Claim (or release, with None) the worker lease of a running application."""
+        ...
+
+    async def past_deadline(
+        self, now: datetime, states: Sequence[ApplicationState]
+    ) -> list[tuple[Application, Opportunity]]:
+        """System scope: applications in `states` whose deadline has passed."""
+        ...
+
+    async def stale_leases(
+        self, now: datetime, states: Sequence[ApplicationState]
+    ) -> list[tuple[Application, Opportunity]]:
+        """System scope: applications in `states` whose worker lease expired."""
         ...
 
     async def transitions(

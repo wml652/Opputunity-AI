@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
 from app.domain.applications.models import Application, Transition
+from app.domain.discovery.listing import HarvestedCard, PageKind
 from app.domain.discovery.models import (
     Campaign,
     CampaignPhase,
@@ -19,6 +20,7 @@ from app.domain.discovery.models import (
     OpportunityExtract,
 )
 from app.domain.discovery.playbook import DomainPlaybook, ExtractionStrategy, FetchStrategy
+from app.domain.discovery.sessions import BrowserSession, SearchCredential
 from app.domain.eligibility.rules import RuleResult
 from app.domain.ports.llm import ILLMProvider
 from app.domain.shared.enums import (
@@ -44,11 +46,44 @@ class ISiteCrawler(Protocol):
 
     async def fetch(self, url: str, strategy: FetchStrategy | None = None) -> FetchedPage: ...
 
+    async def fetch_document(self, url: str) -> FetchedDocument:
+        """Binary download (PDF brochures / calls), SSRF-guarded, size-capped."""
+        ...
+
     async def aclose(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class FetchedDocument:
+    url: str
+    final_url: str
+    status: int | None
+    content_type: str
+    data: bytes
+    error: str | None = None
+    trace: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedDocument:
+    markdown: str
+    pages: int
+    method: str  # pypdf | vision
+
+
+class IDocumentLayoutParser(Protocol):
+    async def parse_pdf(self, data: bytes) -> ParsedDocument:
+        """Text + tables of a PDF as Markdown (raises on an unreadable file)."""
+        ...
+
+
 class ISiteCrawlerFactory(Protocol):
-    def create(self) -> ISiteCrawler: ...
+    def create(
+        self, sessions: dict[str, str] | None = None, *, screenshots: bool = False
+    ) -> ISiteCrawler:
+        """`sessions`: domain -> storage_state JSON of a user-solved browser session.
+        `screenshots`: capture text-sparse pages (only when the user configured a vision model)."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +92,9 @@ class ProcessedPage:
     markdown: str
     content_sha256: str
     injection_flags: list[dict[str, str]]
+    kind: str = PageKind.ARTICLE  # article | listing | mixed
+    cards: list[HarvestedCard] = field(default_factory=list)  # listing cards, links absolute
+    diagnostics: dict[str, Any] = field(default_factory=dict)  # segmenter/distiller stats
 
 
 class IContentProcessor(Protocol):
@@ -94,6 +132,14 @@ class IListingSource(Protocol):
     async def search(self, keyword: str, location: str | None, limit: int) -> list[Listing]: ...
 
 
+class IAuthenticatedListingSource(Protocol):
+    async def search(
+        self, keyword: str, location: str | None, limit: int, storage_state: str
+    ) -> list[Listing]:
+        """Read-only search with the USER's own signed-in session (opt-in, capped per day)."""
+        ...
+
+
 # ---- reasoning ----------------------------------------------------------------------------------
 
 
@@ -110,8 +156,11 @@ class IOpportunityExtractor(Protocol):
         markdown: str,
         source_url: str,
         strategy: ExtractionStrategy | None = None,
+        checkpoint: Callable[[], Awaitable[None]] | None = None,
     ) -> ExtractionResult:
-        """Raises an error carrying `diagnostics` when no window could be extracted."""
+        """Raises an error carrying `diagnostics` only when NO window could be extracted (one
+        failed window never discards the others). `checkpoint` runs before every window and may
+        raise to cancel."""
         ...
 
 
@@ -127,6 +176,37 @@ class IPlaybookRepository(Protocol):
     async def all_for_user(self, user_id: uuid.UUID) -> dict[str, DomainPlaybook]: ...
 
     async def save(self, playbook: DomainPlaybook) -> None: ...
+
+
+class ISearchFactory(Protocol):
+    def create(self, *, tavily_key: str | None, brave_key: str | None) -> ISearchProvider:
+        """A search chain with the user's own keys first, then the zero-key fallback."""
+        ...
+
+
+class IBrowserSessionRepository(Protocol):
+    async def list(self, user_id: uuid.UUID) -> list[BrowserSession]: ...
+    async def get(self, user_id: uuid.UUID, session_id: uuid.UUID) -> BrowserSession | None: ...
+    async def find(self, user_id: uuid.UUID, domain: str, kind: str) -> BrowserSession | None: ...
+    async def upsert(self, session: BrowserSession) -> None:
+        """Insert or replace the session for (user, domain, kind)."""
+        ...
+
+    async def update_usage(self, session: BrowserSession) -> None: ...
+    async def delete(self, user_id: uuid.UUID, session_id: uuid.UUID) -> bool: ...
+
+
+class ISearchCredentialRepository(Protocol):
+    async def list(self, user_id: uuid.UUID) -> list[SearchCredential]: ...
+    async def upsert(self, credential: SearchCredential) -> None: ...
+    async def delete(self, user_id: uuid.UUID, provider: str) -> bool: ...
+
+
+class IHeadfulSessionCapturer(Protocol):
+    async def capture(self, url: str, *, timeout_s: float) -> str:
+        """Open a VISIBLE browser at `url` for the user to pass a challenge / log in; return the
+        resulting storage_state JSON once the page is usable (or raise on timeout/close)."""
+        ...
 
 
 class IFuzzyEligibilityEvaluator(Protocol):
@@ -168,6 +248,10 @@ class ICampaignRepository(Protocol):
 
     async def fail_running(self, error: str, at: datetime) -> int:
         """System scope: mark every RUNNING/DRAFT campaign as FAILED (interrupted)."""
+        ...
+
+    async def active_for_user(self, user_id: uuid.UUID) -> Campaign | None:
+        """The user's DRAFT/RUNNING campaign, if any (one active campaign per user)."""
         ...
 
 
@@ -221,6 +305,12 @@ class IOpportunityRepository(Protocol):
     ) -> None: ...
 
     async def counts(self, user_id: uuid.UUID) -> dict[str, int]: ...
+
+    async def recent_titles(
+        self, user_id: uuid.UUID, limit: int
+    ) -> list[tuple[uuid.UUID, str, str | None, str | None]]:
+        """(id, title, organization, portal_url) of the user's newest opportunities."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

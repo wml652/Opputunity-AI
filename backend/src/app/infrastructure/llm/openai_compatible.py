@@ -10,6 +10,8 @@ import httpx
 from app.domain.llm.provider import HandshakeResult
 from app.domain.ports.llm import ChatMessage, Completion
 from app.infrastructure.llm.http_client import LLMHttpError, OpenAICompatibleClient
+from app.infrastructure.llm.multimodal import OpenAICompatibleReranker, OpenAICompatibleVision
+from app.infrastructure.llm.rate_limiter import RateLimiterRegistry, SlidingWindowRateLimiter
 from app.infrastructure.logging import get_logger
 
 log = get_logger(__name__)
@@ -25,12 +27,17 @@ class OpenAICompatibleProvider:
         http_client: httpx.AsyncClient,
         timeout: float,
         max_retries: int = 2,
+        limiter: SlidingWindowRateLimiter | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._max_retries = max_retries
         self._client = OpenAICompatibleClient(
-            base_url=base_url, api_key=api_key, http_client=http_client, timeout=timeout
+            base_url=base_url,
+            api_key=api_key,
+            http_client=http_client,
+            timeout=timeout,
+            limiter=limiter,
         )
 
     @property
@@ -132,8 +139,16 @@ class OpenAICompatibleProviderFactory:
     """Shares one pooled httpx client across per-request provider instances. Redirects are not
     followed, so a validated host cannot bounce requests to an internal address."""
 
-    def __init__(self, *, timeout: float, http_client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float,
+        http_client: httpx.AsyncClient | None = None,
+        max_retries: int = 1,
+    ) -> None:
         self._timeout = timeout
+        self._max_retries = max_retries
+        self.limiters = RateLimiterRegistry()
         self._http = http_client or httpx.AsyncClient(
             follow_redirects=False,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
@@ -143,13 +158,45 @@ class OpenAICompatibleProviderFactory:
     def http_client(self) -> httpx.AsyncClient:
         return self._http
 
-    def create(self, *, base_url: str, api_key: str, model: str) -> OpenAICompatibleProvider:
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> OpenAICompatibleProvider:
         return OpenAICompatibleProvider(
             base_url=base_url,
             api_key=api_key,
             model=model,
             http_client=self._http,
             timeout=self._timeout,
+            max_retries=self._max_retries,
+            limiter=self.limiters.get(base_url, api_key, rpm_limit),
+        )
+
+    def create_rerank(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> OpenAICompatibleReranker:
+        return OpenAICompatibleReranker(
+            OpenAICompatibleClient(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=self._http,
+                timeout=min(self._timeout, 60.0),
+                limiter=self.limiters.get(base_url, api_key, rpm_limit),
+            ),
+            model,
+        )
+
+    def create_vision(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> OpenAICompatibleVision:
+        return OpenAICompatibleVision(
+            OpenAICompatibleClient(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=self._http,
+                timeout=self._timeout,
+                limiter=self.limiters.get(base_url, api_key, rpm_limit),
+            ),
+            model,
         )
 
     async def aclose(self) -> None:

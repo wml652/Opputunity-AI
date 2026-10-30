@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+import uuid
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -17,11 +18,22 @@ from app.api.container import (
     ApplicationUseCases,
     DiscoveryUseCases,
     NotificationUseCases,
+    SessionUseCases,
     VaultUseCases,
+)
+from app.application.applications.submission import (
+    ApproveSubmission,
+    GetReceiptScreenshot,
+    GetVerification,
+    ReapLeases,
+    RejectApplication,
+    RunSubmission,
+    SweepDeadlines,
 )
 from app.application.applications.use_cases import (
     AnswerQuestion,
     ApplicationDeps,
+    BatchPrepare,
     GetApplicationDetail,
     GetCheckpointScreenshot,
     GetInbox,
@@ -36,6 +48,15 @@ from app.application.auth.use_cases import (
     Logout,
     RefreshSession,
     RegisterUser,
+)
+from app.application.discovery.sessions import (
+    CaptureBrowserSession,
+    DeleteBrowserSession,
+    DeleteSearchCredential,
+    ListBrowserSessions,
+    ListSearchCredentials,
+    SaveSearchCredential,
+    SessionDeps,
 )
 from app.application.discovery.use_cases import (
     CancelCampaign,
@@ -76,6 +97,8 @@ from app.application.llm.use_cases import (
     ListProviderConfigs,
     LLMDeps,
     ResolveChatProvider,
+    ResolveRerankProvider,
+    ResolveVisionProvider,
     RunTestPrompt,
     UpdateProviderConfig,
     VerifyConnection,
@@ -98,6 +121,7 @@ from app.application.notifications.use_cases import (
     SendTestNotification,
     VerifyChannel,
 )
+from app.application.profile.indexing import IndexDocument, IndexMissingDocuments
 from app.application.profile.use_cases import (
     DeleteDocument,
     DownloadDocument,
@@ -107,13 +131,21 @@ from app.application.profile.use_cases import (
     SaveProfile,
     UploadDocument,
 )
+from app.application.services.evidence import EvidenceDeps, ProfileEvidenceRetriever
 from app.application.system.use_cases import GetWorkerStatus
 from app.application.vault_deps import VaultDeps
 from app.domain.ports.applications import IApplicationRunner, INotifier
-from app.domain.ports.discovery import ICampaignRunner
+from app.domain.ports.discovery import ICampaignRunner, IHeadfulSessionCapturer
+from app.domain.ports.llm import (
+    IRerankProvider,
+    IRerankProviderFactory,
+    IVisionProvider,
+    IVisionProviderFactory,
+)
 from app.domain.shared.clock import Clock, SystemClock
 from app.domain.shared.enums import NotifChannel
 from app.infrastructure.browser.form_filler import PlaywrightFormFiller
+from app.infrastructure.browser.session_capture import PlaywrightSessionCapturer
 from app.infrastructure.config.settings import Settings
 from app.infrastructure.crypto.aes_gcm_cipher import AesGcmCipher
 from app.infrastructure.crypto.key_ring import KeyRing
@@ -122,10 +154,12 @@ from app.infrastructure.db.uow import SqlAlchemyUnitOfWorkFactory, SystemUnitOfW
 from app.infrastructure.documents.pdf import PypdfTextExtractor
 from app.infrastructure.events.campaign_log import FileCampaignLog
 from app.infrastructure.events.redis_bus import RedisEventBus, RedisWorkerRegistry
+from app.infrastructure.extraction.evidence_answerer import LlmEvidenceAnswerer
 from app.infrastructure.extraction.llm_adapters import (
     LlmFuzzyEligibilityEvaluator,
     LlmOpportunityExtractor,
 )
+from app.infrastructure.linkedin.authenticated_adapter import LinkedInAuthenticatedAdapter
 from app.infrastructure.linkedin.public_adapter import LinkedInPublicAdapter
 from app.infrastructure.llm.embeddings import EmbeddingProviderFactory
 from app.infrastructure.llm.openai_compatible import OpenAICompatibleProviderFactory
@@ -139,10 +173,11 @@ from app.infrastructure.notify.notifiers import (
 from app.infrastructure.runners.application_runner import InProcessApplicationRunner
 from app.infrastructure.runners.campaign_runners import InProcessCampaignRunner
 from app.infrastructure.scraping.distiller import HtmlContentProcessor
+from app.infrastructure.scraping.document_parser import PdfLayoutParser
 from app.infrastructure.scraping.fetchers import playwright_available
 from app.infrastructure.scraping.site_crawler import SiteCrawlerFactory
 from app.infrastructure.scraping.ssrf_guard import Resolver, SsrfGuard
-from app.infrastructure.search.providers import build_search_chain
+from app.infrastructure.search.providers import SearchChainFactory, build_search_chain
 from app.infrastructure.security.passwords import Argon2PasswordHasher
 from app.infrastructure.security.tokens import JwtAccessTokenService, RefreshTokenCodec
 from app.infrastructure.storage.local_fs import LocalFileStorage
@@ -168,6 +203,9 @@ class Infrastructure:
     clock: Clock
     campaign_runner: ICampaignRunner | None = None
     application_runner: IApplicationRunner | None = None
+    session_capturer: IHeadfulSessionCapturer | None = None  # tests inject a fake
+    rerank_factory: IRerankProviderFactory | None = None  # tests inject a fake
+    vision_factory: IVisionProviderFactory | None = None  # tests inject a fake
     background: set[asyncio.Task[None]] = field(default_factory=set)
 
     def spawn(self, coro: Coroutine[Any, Any, None]) -> None:
@@ -210,7 +248,9 @@ def build_infrastructure(
     engine = engine or create_engine(settings.database_url, pool_size=settings.db_pool_size)
     sessionmaker = create_sessionmaker(engine)
     redis = redis or _connect_redis(settings.redis_url)
-    llm_factory = OpenAICompatibleProviderFactory(timeout=settings.llm_timeout_seconds)
+    llm_factory = OpenAICompatibleProviderFactory(
+        timeout=settings.llm_timeout_seconds, max_retries=settings.llm_max_retries
+    )
     return Infrastructure(
         settings=settings,
         engine=engine,
@@ -249,7 +289,39 @@ def llm_deps(infra: Infrastructure) -> LLMDeps:
         provider_factory=infra.llm_factory,
         embedding_factory=infra.embedding_factory,
         clock=infra.clock,
+        rerank_factory=infra.rerank_factory or _RerankFactory(infra),
+        vision_factory=infra.vision_factory or _VisionFactory(infra),
     )
+
+
+class _RerankFactory:
+    """Delegates to the shared OpenAI-compatible factory (same HTTP pool + RPM limiters)."""
+
+    def __init__(self, infra: Infrastructure) -> None:
+        self._infra = infra
+
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> IRerankProvider:
+        factory: Any = self._infra.llm_factory
+        provider: IRerankProvider = factory.create_rerank(
+            base_url=base_url, api_key=api_key, model=model, rpm_limit=rpm_limit
+        )
+        return provider
+
+
+class _VisionFactory:
+    def __init__(self, infra: Infrastructure) -> None:
+        self._infra = infra
+
+    def create(
+        self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
+    ) -> IVisionProvider:
+        factory: Any = self._infra.llm_factory
+        provider: IVisionProvider = factory.create_vision(
+            base_url=base_url, api_key=api_key, model=model, rpm_limit=rpm_limit
+        )
+        return provider
 
 
 def build_relay(infra: Infrastructure) -> RelayOutbox:
@@ -318,6 +390,51 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
         chat=ResolveChatProvider(llm),
         embeddings=GetEmbeddingProvider(llm),
         campaign_log=FileCampaignLog(s.logs_dir),
+        cipher=infra.cipher,
+        rerank=ResolveRerankProvider(llm),
+        vision=ResolveVisionProvider(llm),
+        layout=PdfLayoutParser(PypdfTextExtractor()),
+        auto_stage=_auto_stager(infra),
+        linkedin_auth=LinkedInAuthenticatedAdapter(infra.crawl_guard)
+        if playwright_available()
+        else None,
+        search_factory=SearchChainFactory(
+            infra.llm_factory.http_client,
+            default_tavily_key=s.tavily_api_key.get_secret_value() if s.tavily_api_key else None,
+            default_brave_key=s.brave_api_key.get_secret_value() if s.brave_api_key else None,
+        ),
+    )
+
+
+def _auto_stager(infra: Infrastructure) -> Callable[[uuid.UUID, int], Awaitable[list[uuid.UUID]]]:
+    async def stage(user_id: uuid.UUID, limit: int) -> list[uuid.UUID]:
+        batch = BatchPrepare(infra.uow_factory, build_application_runner(infra))
+        return (await batch.execute(user_id, limit)).started
+
+    return stage
+
+
+def build_sessions(infra: Infrastructure) -> SessionUseCases:
+    s = infra.settings
+    # A visible browser only makes sense on the user's own machine (local runtime).
+    headful = s.environment != "production" and s.allow_headful_capture and playwright_available()
+    deps = SessionDeps(
+        uow_factory=infra.uow_factory,
+        cipher=infra.cipher,
+        clock=infra.clock,
+        url_guard=infra.crawl_guard,
+        capturer=infra.session_capturer
+        or (PlaywrightSessionCapturer(infra.crawl_guard) if headful else None),
+        spawn=infra.spawn,
+    )
+    return SessionUseCases(
+        list_sessions=ListBrowserSessions(deps),
+        capture=CaptureBrowserSession(deps),
+        delete_session=DeleteBrowserSession(deps),
+        list_search=ListSearchCredentials(deps),
+        save_search=SaveSearchCredential(deps),
+        delete_search=DeleteSearchCredential(deps),
+        headful_available=deps.capturer is not None,
     )
 
 
@@ -435,15 +552,48 @@ def build_application_deps(infra: Infrastructure) -> ApplicationDeps:
         update_memory=vault.update_memory,
         essays=build_essay_engine(infra),
         notify=NotifyUser(build_notification_deps(infra)),
+        evidence=build_evidence_retriever(infra),
+    )
+
+
+def build_evidence_retriever(infra: Infrastructure) -> ProfileEvidenceRetriever:
+    llm = llm_deps(infra)
+    vault = VaultDeps(
+        uow_factory=infra.uow_factory,
+        cipher=infra.cipher,
+        clock=infra.clock,
+        storage=infra.storage,
+        pdf=PypdfTextExtractor(),
+        stylometry=StylometryAnalyzer(),
+        embeddings=build_embedding_resolver(infra),
+    )
+    return ProfileEvidenceRetriever(
+        EvidenceDeps(
+            uow_factory=infra.uow_factory,
+            embeddings=GetEmbeddingProvider(llm),
+            chat=ResolveChatProvider(llm),
+            answerer=LlmEvidenceAnswerer(),
+            backfill=IndexMissingDocuments(IndexDocument(vault)),
+        )
     )
 
 
 def build_application_runner(infra: Infrastructure) -> IApplicationRunner:
     if infra.application_runner is None:
+        deps = build_application_deps(infra)
         infra.application_runner = InProcessApplicationRunner(
-            RunApplication(build_application_deps(infra))
+            RunApplication(deps),
+            RunSubmission(deps),
+            max_parallel=infra.settings.max_parallel_fills,
         )
     return infra.application_runner
+
+
+def build_maintenance(infra: Infrastructure) -> tuple[ReapLeases, SweepDeadlines]:
+    return (
+        ReapLeases(infra.system_uow_factory, infra.clock),
+        SweepDeadlines(infra.system_uow_factory, infra.clock),
+    )
 
 
 def build_applications(infra: Infrastructure) -> ApplicationUseCases:
@@ -459,6 +609,11 @@ def build_applications(infra: Infrastructure) -> ApplicationUseCases:
         synthesize=engine,
         edit_draft=EditEssayDraft(engine.deps),
         list_drafts=ListEssayDrafts(infra.uow_factory),
+        verification=GetVerification(deps),
+        batch=BatchPrepare(infra.uow_factory, runner),
+        approve=ApproveSubmission(deps, runner.submit),
+        reject=RejectApplication(infra.uow_factory, infra.clock),
+        receipt=GetReceiptScreenshot(deps),
     )
 
 
@@ -538,4 +693,5 @@ def build_api_container(infra: Infrastructure) -> ApiContainer:
         discovery=build_discovery(infra),
         applications=build_applications(infra),
         notifications=build_notifications(infra),
+        sessions=build_sessions(infra),
     )

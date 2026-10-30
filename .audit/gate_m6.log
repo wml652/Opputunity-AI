@@ -1,0 +1,117 @@
+All checks passed!
+220 files already formatted
+Success: no issues found in 173 source files
+=============
+Import Linter
+=============
+
+
+---------
+Contracts
+---------
+
+Analyzed 238 files, 1166 dependencies.
+--------------------------------------
+
+Hexagonal layers KEPT
+Domain and application are framework-free KEPT
+
+Contracts: 2 kept, 0 broken.
+........................................................................ [ 19%]
+........................................................................ [ 38%]
+........................................................................ [ 58%]
+........................................................................ [ 77%]
+........................................................................ [ 97%]
+...........                                                              [100%]
+=============================== tests coverage ================================
+______________ coverage: platform win32, python 3.12.16-final-0 _______________
+
+Name                                                       Stmts   Miss  Cover
+------------------------------------------------------------------------------
+src\app\api\middleware\security.py                            66      3    95%
+src\app\api\v1\applications.py                               304      9    97%
+src\app\api\v1\auth.py                                        36      1    97%
+src\app\api\v1\events.py                                      69      4    94%
+src\app\api\v1\llm.py                                         48      1    98%
+src\app\api\v1\sessions.py                                    74      2    97%
+src\app\api\v1\vault.py                                       90      3    97%
+src\app\application\applications\submission.py               251     69    73%
+src\app\application\applications\use_cases.py                356     77    78%
+src\app\application\auth\use_cases.py                        141     51    64%
+src\app\application\discovery\runner.py                      836    138    83%
+src\app\application\discovery\sessions.py                    156     37    76%
+src\app\application\discovery\use_cases.py                   211     29    86%
+src\app\application\essay\synthesis.py                       140     17    88%
+src\app\application\essay\use_cases.py                       108     44    59%
+src\app\application\events\use_cases.py                       29      1    97%
+src\app\application\llm\use_cases.py                         367     89    76%
+src\app\application\memory\use_cases.py                       85     16    81%
+src\app\application\notifications\use_cases.py               150     28    81%
+src\app\application\profile\indexing.py                       39      5    87%
+src\app\application\profile\use_cases.py                     159     28    82%
+src\app\application\services\evidence.py                      50      4    92%
+src\app\application\services\field_mapper.py                 118      6    95%
+src\app\bootstrap\app.py                                      57     36    37%
+src\app\bootstrap\container.py                               208     29    86%
+src\app\domain\discovery\listing.py                          148      4    97%
+src\app\domain\discovery\models.py                           214      9    96%
+src\app\domain\discovery\playbook.py                         175     13    93%
+src\app\domain\discovery\rag_filter.py                       187      7    96%
+src\app\domain\discovery\sessions.py                          52      1    98%
+src\app\domain\eligibility\rules.py                          121      3    98%
+src\app\domain\essay\models.py                                79      4    95%
+src\app\domain\essay\synthesis.py                             46      1    98%
+src\app\domain\identity\models.py                             45      3    93%
+src\app\domain\memory\models.py                               72      5    93%
+src\app\domain\notification\models.py                         65      2    97%
+src\app\domain\profile\evidence.py                            76      3    96%
+src\app\domain\profile\models.py                              95      4    96%
+src\app\infrastructure\browser\form_filler.py                248     33    87%
+src\app\infrastructure\browser\session_capture.py             55     36    35%
+src\app\infrastructure\config\settings.py                     92      9    90%
+src\app\infrastructure\crypto\keygen.py                        9      1    89%
+src\app\infrastructure\db\repositories\applications.py       194     17    91%
+src\app\infrastructure\db\repositories\discovery.py          188     26    86%
+src\app\infrastructure\db\repositories\events.py              36      1    97%
+src\app\infrastructure\db\repositories\identity.py            39      4    90%
+src\app\infrastructure\db\repositories\llm.py                 47      3    94%
+src\app\infrastructure\db\repositories\sessions.py            45      4    91%
+src\app\infrastructure\db\repositories\vault.py              162     31    81%
+src\app\infrastructure\db\rls.py                              14      3    79%
+src\app\infrastructure\db\session.py                           7      1    86%
+src\app\infrastructure\db\uow.py                              87      2    98%
+src\app\infrastructure\documents\pdf.py                       31      2    94%
+src\app\infrastructure\events\outbox_relay.py                 61      5    92%
+src\app\infrastructure\events\redis_bus.py                    56      4    93%
+src\app\infrastructure\extraction\evidence_answerer.py        37      4    89%
+src\app\infrastructure\extraction\llm_adapters.py            253     17    93%
+src\app\infrastructure\linkedin\authenticated_adapter.py      46     27    41%
+src\app\infrastructure\linkedin\public_adapter.py             67      8    88%
+src\app\infrastructure\llm\embeddings.py                      68      1    99%
+src\app\infrastructure\llm\http_client.py                     92      9    90%
+src\app\infrastructure\llm\multimodal.py                      52     31    40%
+src\app\infrastructure\llm\openai_compatible.py               63      3    95%
+src\app\infrastructure\logging\__init__.py                    62      2    97%
+src\app\infrastructure\notify\notifiers.py                    89     40    55%
+src\app\infrastructure\runners\application_runner.py          41      5    88%
+src\app\infrastructure\runners\campaign_runners.py            33      6    82%
+src\app\infrastructure\runtime\event_loop.py                  28      4    86%
+src\app\infrastructure\scraping\distiller.py                 101      3    97%
+src\app\infrastructure\scraping\document_parser.py            18      1    94%
+src\app\infrastructure\scraping\egress_proxy.py              166     29    83%
+src\app\infrastructure\scraping\fetchers.py                  296     84    72%
+src\app\infrastructure\scraping\segmenter.py                 135      7    95%
+src\app\infrastructure\scraping\site_crawler.py              112      3    97%
+src\app\infrastructure\scraping\ssrf_guard.py                102     14    86%
+src\app\infrastructure\search\providers.py                    78     12    85%
+src\app\infrastructure\security\passwords.py                  18      2    89%
+src\app\infrastructure\security\tokens.py                     48      2    96%
+src\app\infrastructure\storage\local_fs.py                    30      1    97%
+src\app\infrastructure\stylometry\metrics.py                 110      2    98%
+src\app\infrastructure\workers\tasks.py                       39      5    87%
+------------------------------------------------------------------------------
+TOTAL                                                      11401   1290    89%
+
+90 files skipped due to complete coverage.
+371 passed in 378.20s (0:06:18)
+EXIT 0

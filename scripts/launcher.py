@@ -311,7 +311,41 @@ def open_browser() -> None:
     webbrowser.open(CONSOLE)
 
 
+class _LaunchLock:
+    """One launch at a time: a double-click must not run two bootstraps against the same
+    embedded database (they killed each other's PostgreSQL startup)."""
+
+    def __init__(self) -> None:
+        LOGS.mkdir(exist_ok=True)
+        self._file = (LOGS / "launcher.lock").open("a+b")
+
+    def __enter__(self) -> bool:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
+
+    def __exit__(self, *_exc: object) -> None:
+        self._file.close()  # releases the lock
+
+
 def start() -> None:
+    with _LaunchLock() as acquired:
+        if not acquired:
+            say("a launch is already in progress; the browser opens when it is ready")
+            return
+        _start()
+
+
+def _start() -> None:
     env = build_env()
     if api_up() and console_up():
         say("OPPORTUNITIES ON THE GO is already running")
