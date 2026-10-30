@@ -124,6 +124,7 @@ async def _campaign(user: ApiUser) -> dict[str, Any]:
     created = await user.post(
         "/api/v1/campaigns",
         json={
+            "auto_stage": False,
             "keywords": ["research fellowship"],
             "scope": "INTERNATIONAL",
             "use_websites": False,

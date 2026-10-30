@@ -138,7 +138,7 @@ async def _start(user: ApiUser, **body: Any) -> str:
         "max_search_queries": 1,
         **body,
     }
-    created = await user.post("/api/v1/campaigns", json=payload)
+    created = await user.post("/api/v1/campaigns", json={"auto_stage": False, **payload})
     assert created.status_code == 201, created.text
     return str(created.json()["id"])
 
@@ -375,7 +375,8 @@ async def test_cancel_stops_within_two_seconds_and_one_active_campaign(
         await asyncio.sleep(0.05)
     await asyncio.sleep(0.3)
     blocked = await user.post(
-        "/api/v1/campaigns", json={"keywords": ["x"], "use_websites": False, "use_search": True}
+        "/api/v1/campaigns",
+        json={"auto_stage": False, "keywords": ["x"], "use_websites": False, "use_search": True},
     )
     assert blocked.status_code == 409 and "still running" in blocked.json()["error"]["message"]
     started = time.monotonic()
@@ -442,7 +443,7 @@ async def test_concurrent_playbook_saves_do_not_deadlock(
             keywords=["x"],
             status=CampaignStatus.RUNNING,
             phase=CampaignPhase.CRAWLING,
-            settings=CampaignSettings(),
+            settings=CampaignSettings(auto_stage=False),
             counters={},
             error=None,
             created_at=now,

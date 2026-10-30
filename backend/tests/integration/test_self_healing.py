@@ -96,7 +96,7 @@ async def _run(user: ApiUser, **body: Any) -> dict[str, Any]:
         "max_pages_per_site": 5,
         **body,
     }
-    created = await user.post("/api/v1/campaigns", json=payload)
+    created = await user.post("/api/v1/campaigns", json={"auto_stage": False, **payload})
     assert created.status_code == 201, created.text
     cid = created.json()["id"]
     for _ in range(600):

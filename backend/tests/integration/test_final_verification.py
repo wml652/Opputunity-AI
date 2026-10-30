@@ -305,6 +305,7 @@ async def test_linkedin_daily_cap_is_enforced(
         blocked = await user.post(
             "/api/v1/campaigns",
             json={
+                "auto_stage": False,
                 "keywords": ["a"],
                 "use_websites": False,
                 "use_search": False,
@@ -335,6 +336,7 @@ async def test_linkedin_daily_cap_is_enforced(
         created = await user.post(
             "/api/v1/campaigns",
             json={
+                "auto_stage": False,
                 "keywords": ["research internship", "undergraduate scholarship"],
                 "use_websites": False,
                 "use_search": False,

@@ -5,6 +5,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 
 import { refreshSession } from "./api";
 import { discoveryKeys } from "./discovery-queries";
+import { progressSchema, type ProgressT } from "./discovery-schemas";
 import { keys } from "./queries";
 import { pipelineEventSchema, type PipelineEvent } from "./schemas";
 
@@ -25,6 +26,7 @@ const DISCOVERY_EVENTS = new Set([
   "page.retrying",
   "page.retried",
   "source.failed",
+  "applications.auto_staged",
 ]);
 // Filler, inbox, essay and memory events refresh the application/inbox caches.
 const APPLICATION_EVENTS = new Set([
@@ -32,21 +34,30 @@ const APPLICATION_EVENTS = new Set([
   "application.submission",
   "essay.draft_created",
   "memory.learned",
+  "applications.auto_staged",
 ]);
 const SESSION_EVENTS = new Set(["session.captured", "session.failed"]);
 
 export type StreamState = "connecting" | "live" | "reconnecting";
 
+/** Latest streamed progress per campaign (both progress bars). */
+export interface LiveProgress {
+  seq: number;
+  progress: ProgressT;
+}
+
 interface EventStreamValue {
   state: StreamState;
   events: PipelineEvent[];
   lastSeq: number;
+  progress: Record<string, LiveProgress>;
 }
 
 const EventStreamContext = createContext<EventStreamValue>({
   state: "connecting",
   events: [],
   lastSeq: 0,
+  progress: {},
 });
 
 export function useEventStream(): EventStreamValue {
@@ -62,6 +73,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [state, setState] = useState<StreamState>("connecting");
   const [events, setEvents] = useState<PipelineEvent[]>([]);
+  const [progress, setProgress] = useState<Record<string, LiveProgress>>({});
   const lastSeq = useRef(0);
 
   useEffect(() => {
@@ -92,6 +104,15 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       const event = parsed.data;
       if (event.seq <= lastSeq.current) return;
       lastSeq.current = event.seq;
+      const campaignId = typeof event.payload.campaign_id === "string" ? event.payload.campaign_id : null;
+      const live = progressSchema.safeParse(
+        event.type === "campaign.progress" ? event.payload : event.payload.progress,
+      );
+      if (campaignId && live.success) {
+        setProgress((prev) => ({ ...prev, [campaignId]: { seq: event.seq, progress: live.data } }));
+      }
+      // Progress ticks drive the bars only; they would drown the event log.
+      if (event.type === "campaign.progress") return;
       setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
       if (event.type === "llm.status" || event.type === "llm.config_changed") {
         coalesce("llm", [keys.status, keys.providers], 300);
@@ -135,7 +156,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
   }, [qc]);
 
   return (
-    <EventStreamContext.Provider value={{ state, events, lastSeq: events[0]?.seq ?? 0 }}>
+    <EventStreamContext.Provider value={{ state, events, lastSeq: events[0]?.seq ?? 0, progress }}>
       {children}
     </EventStreamContext.Provider>
   );

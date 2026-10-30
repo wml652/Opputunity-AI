@@ -34,6 +34,7 @@ from app.application.applications.unblock import UnblockApplication
 from app.application.applications.use_cases import (
     AnswerQuestion,
     ApplicationDeps,
+    AutoStageCampaign,
     BatchPrepare,
     GetApplicationDetail,
     GetCheckpointScreenshot,
@@ -407,10 +408,26 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
     )
 
 
-def _auto_stager(infra: Infrastructure) -> Callable[[uuid.UUID, int], Awaitable[list[uuid.UUID]]]:
-    async def stage(user_id: uuid.UUID, limit: int) -> list[uuid.UUID]:
+def _auto_stager(
+    infra: Infrastructure,
+) -> Callable[
+    [uuid.UUID, uuid.UUID, int, Callable[[int, int, str | None], Awaitable[None]]],
+    Awaitable[dict[str, int]],
+]:
+    async def stage(
+        user_id: uuid.UUID,
+        campaign_id: uuid.UUID,
+        limit: int,
+        progress: Callable[[int, int, str | None], Awaitable[None]],
+    ) -> dict[str, int]:
         batch = BatchPrepare(infra.uow_factory, build_application_runner(infra))
-        return (await batch.execute(user_id, limit)).started
+        report = await AutoStageCampaign(infra.uow_factory, batch).execute(
+            user_id, campaign_id, limit, progress
+        )
+        counts: dict[str, int] = {}
+        for state in report.states.values():
+            counts[state] = counts.get(state, 0) + 1
+        return counts
 
     return stage
 

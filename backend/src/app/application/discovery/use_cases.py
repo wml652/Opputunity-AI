@@ -78,7 +78,15 @@ class DiscoveryDeps:
     vision: ResolveVisionProvider | None = None  # user's optional vision model
     layout: IDocumentLayoutParser | None = None  # PDF opportunity documents
     # Batch auto-stage (opt-in per campaign): prepare the top-N queued applications.
-    auto_stage: Callable[[uuid.UUID, int], Awaitable[list[uuid.UUID]]] | None = None
+    # (user, campaign, limit, progress(done, total, current_title)) -> {final state: count}.
+    # Fills the campaign's queued applications up to the final OK gate; never submits.
+    auto_stage: (
+        Callable[
+            [uuid.UUID, uuid.UUID, int, Callable[[int, int, str | None], Awaitable[None]]],
+            Awaitable[dict[str, int]],
+        ]
+        | None
+    ) = None
 
 
 @dataclass(frozen=True, slots=True)

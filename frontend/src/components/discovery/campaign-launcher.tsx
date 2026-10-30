@@ -69,8 +69,9 @@ export function CampaignLauncher({ compact = false, onLaunched }: { compact?: bo
   const [useLinkedinAuth, setUseLinkedinAuth] = useState(false);
   const [maxPages, setMaxPages] = useState(15);
   const [depth, setDepth] = useState(2);
-  const [autoStage, setAutoStage] = useState(false);
-  const [autoStageLimit, setAutoStageLimit] = useState(5);
+  // On by default: a campaign continues into Filling and Awaiting OK (never submits).
+  const [autoStage, setAutoStage] = useState(true);
+  const [autoStageLimit, setAutoStageLimit] = useState(10);
   const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(event: FormEvent) {

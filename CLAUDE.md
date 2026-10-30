@@ -55,6 +55,16 @@ Layers, top to bottom. A layer may import only layers below it.
 - Never submit an application without a recorded human "OK" whose `preview_hash` matches.
   Batch auto-stage (`BatchPrepare`, `POST /applications/batch-prepare`, campaign `auto_stage`)
   only fills up to `AWAITING_FINAL_VERIFICATION` / `PAUSED_NEEDS_USER_INPUT`, max 25 at a time.
+  Campaign `auto_stage` is ON by default (limit 10): the runner enters phase `FILLING`, waits
+  (`AutoStageCampaign`) until each of the campaign's staged applications has left the filler,
+  then `AWAITING_OK` (if any is ready) and only then `COMPLETED`.
+- The filler fills ONLY the application form: search, newsletter, lead-capture / counselling,
+  comment and contact forms are excluded by `SCOPE_JS` and never receive student data. From an
+  overview / directory page it follows at most `MAX_ENTRY_HOPS` (2) high-confidence "Apply now" /
+  "Official website" links (fill and submit replay alike); the checkpoint stores the form URL.
+- Campaign progress (`domain.discovery.progress.campaign_progress`) is a pure function of phase
+  + counters; the runner streams it as throttled `campaign.progress` events and the API returns
+  it on every campaign. Overall reaches 100% only at `COMPLETED`.
 - Evidence RAG (`ProfileEvidenceRetriever`): CV/transcript `document_chunks`, essay chunks and
   memory snippets are PII-redacted (`redact_pii` with the profile's known PII values) BEFORE any
   model call; the model's answer is redacted again. Auto-fill only when model confidence x

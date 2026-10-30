@@ -13,6 +13,7 @@ from app.api.deps import Container, CurrentUserId
 from app.application.discovery.use_cases import CampaignInput, PipelineSummary
 from app.domain.applications.models import Application
 from app.domain.discovery.models import Campaign, CampaignSettings, CrawledPage, Opportunity
+from app.domain.discovery.progress import campaign_progress
 from app.domain.ports.discovery import OpportunityFilter, Verdict
 from app.domain.shared.enums import (
     ApplicationState,
@@ -47,8 +48,8 @@ class CampaignIn(BaseModel):
     max_details_per_hub: int = Field(default=12, ge=0, le=50)
     max_detail_pages: int = Field(default=60, ge=0, le=300)
     extraction_workers: int = Field(default=2, ge=1, le=4)
-    auto_stage: bool = False
-    auto_stage_limit: int = Field(default=5, ge=1, le=25)
+    auto_stage: bool = True
+    auto_stage_limit: int = Field(default=10, ge=1, le=25)
 
 
 class SourceOut(BaseModel):
@@ -71,6 +72,7 @@ class CampaignOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     sources: list[SourceOut]
+    progress: dict[str, Any]
 
     @staticmethod
     def of(c: Campaign) -> CampaignOut:
@@ -88,6 +90,9 @@ class CampaignOut(BaseModel):
             started_at=c.started_at,
             finished_at=c.finished_at,
             sources=[SourceOut(id=s.id, source_type=s.source_type, url=s.url) for s in c.sources],
+            progress=campaign_progress(
+                c.phase.value, c.counters, auto_stage=c.settings.auto_stage
+            ).to_dict(),
         )
 
 

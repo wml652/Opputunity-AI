@@ -5,7 +5,9 @@ the explicit human OK gate (Milestone 5)."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -587,11 +589,15 @@ class BatchPrepare:
     uow_factory: IUnitOfWorkFactory
     runner: IApplicationRunner
 
-    async def execute(self, user_id: uuid.UUID, limit: int = 5) -> BatchResult:
+    async def execute(
+        self, user_id: uuid.UUID, limit: int = 5, *, campaign_id: uuid.UUID | None = None
+    ) -> BatchResult:
         if not 1 <= limit <= MAX_BATCH:
             raise ValidationError(f"limit must be 1-{MAX_BATCH}")
         async with self.uow_factory(user_id) as uow:
             queued = await uow.app_details.list_by_states(user_id, [S.QUEUED])  # deadline ASC
+        if campaign_id is not None:
+            queued = [(app, opp) for app, opp in queued if opp.campaign_id == campaign_id]
         with_portal = [(app, opp) for app, opp in queued if opp.portal_url]
         picked = with_portal[:limit]
         for app, _ in picked:
@@ -599,6 +605,73 @@ class BatchPrepare:
         return BatchResult(
             [app.id for app, _ in picked], skipped_no_portal=len(queued) - len(with_portal)
         )
+
+
+# States in which an auto-staged application is still being worked on by the filler.
+IN_FLIGHT = frozenset({S.QUEUED, S.PREPARING, S.FILLING, S.RESUME_QUEUED})
+STAGE_POLL_S = 1.0
+STAGE_TIMEOUT_S = 15 * 60.0
+
+StageProgress = Callable[[int, int, str | None], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class StageReport:
+    started: list[uuid.UUID]
+    states: dict[uuid.UUID, str]
+    timed_out: bool = False
+
+    def count(self, state: ApplicationState) -> int:
+        return sum(1 for s in self.states.values() if s == state.value)
+
+
+@dataclass(slots=True)
+class AutoStageCampaign:
+    """Campaign auto-stage: start filling the campaign's closest-deadline queued applications
+    (BatchPrepare) and wait until each has left the filler - AWAITING_FINAL_VERIFICATION,
+    PAUSED_NEEDS_USER_INPUT or BLOCKED_NEEDS_HUMAN - so the campaign only completes after its
+    staging pass. Never submits. `progress(done, total, current_title)` is awaited on every
+    change and may raise to cancel (the applications themselves keep running)."""
+
+    uow_factory: IUnitOfWorkFactory
+    batch: BatchPrepare
+    poll_s: float = STAGE_POLL_S
+    timeout_s: float = STAGE_TIMEOUT_S
+
+    async def execute(
+        self,
+        user_id: uuid.UUID,
+        campaign_id: uuid.UUID,
+        limit: int,
+        progress: StageProgress | None = None,
+    ) -> StageReport:
+        started = (await self.batch.execute(user_id, limit, campaign_id=campaign_id)).started
+        states: dict[uuid.UUID, str] = dict.fromkeys(started, S.QUEUED.value)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_s
+        last: tuple[int, str | None] | None = None
+        while True:
+            titles: dict[uuid.UUID, str] = {}
+            async with self.uow_factory(user_id) as uow:
+                for app_id in started:
+                    found = await uow.app_details.get(user_id, app_id)
+                    if found is not None:
+                        states[app_id] = found[0].state.value
+                        titles[app_id] = found[1].title
+            active = [a for a in started if S(states[a]) in IN_FLIGHT]
+            done = len(started) - len(active)
+            current = next(
+                (titles.get(a) for a in active if states[a] != S.QUEUED.value),
+                titles.get(active[0]) if active else None,
+            )
+            if progress is not None and (done, current) != last:
+                last = (done, current)
+                await progress(done, len(started), current)
+            if not active:
+                return StageReport(started, states)
+            if loop.time() > deadline:
+                return StageReport(started, states, timed_out=True)
+            await asyncio.sleep(self.poll_s)
 
 
 @dataclass(frozen=True, slots=True)

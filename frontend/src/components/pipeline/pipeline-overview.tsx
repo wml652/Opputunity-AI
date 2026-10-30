@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { CampaignLauncher } from "@/components/discovery/campaign-launcher";
+import { ProgressBars } from "@/components/pipeline/progress-bars";
 import { DeadlineCell } from "@/components/discovery/outcome";
 import { Button } from "@/components/ui/button";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
@@ -116,8 +117,14 @@ function describe(event: PipelineEvent): { summary: string; tone?: "ok" | "err" 
       return { summary: `Document stored: ${String(p.kind)} · ${String(p.pages)} pages`, tone: "ok" };
     case "essay.fingerprint_updated":
       return { summary: `Fingerprint v${String(p.version)} · burstiness ${Number(p.burstiness).toFixed(3)}`, tone: "ok" };
-    case "applications.auto_staged":
-      return { summary: `Auto-staged ${String(p.count)} eligible application(s) up to the final OK gate`, tone: "ok" };
+    case "applications.auto_staged": {
+      const states = (p.states ?? {}) as Record<string, number>;
+      const parts = Object.entries(states).map(([s, n]) => `${n} ${s.toLowerCase().replaceAll("_", " ")}`);
+      return {
+        summary: `Auto-staged ${String(p.count)} application(s) up to the final OK gate${parts.length ? ` · ${parts.join(", ")}` : ""}`,
+        tone: "ok",
+      };
+    }
     case "memory.learned":
       return { summary: "New answer learned into semantic memory", tone: "ok" };
   }
@@ -130,10 +137,20 @@ export function PipelineOverview() {
   const campaign = summary?.latest_campaign ?? null;
   const running = campaign?.status === "RUNNING";
   const phaseIndex = campaign ? PHASES.findIndex((p) => p.key === campaign.phase) : -1;
-  const doneThrough = campaign?.phase === "COMPLETED" ? 3 : phaseIndex - 1;
+  const counters = campaign?.counters ?? {};
+  const staged = (counters.stage_target ?? 0) > 0;
+  const awaitingOk = (counters.stage_ready ?? 0) > 0 && ["COMPLETED", "AWAITING_OK"].includes(campaign?.phase ?? "");
+  // COMPLETED after an auto-stage pass: Queued and Filling are done; Awaiting OK needs the user.
+  const doneThrough =
+    campaign?.phase === "COMPLETED" || campaign?.phase === "AWAITING_OK"
+      ? staged
+        ? 4
+        : 3
+      : phaseIndex - 1;
 
   return (
     <div className="flex flex-col gap-3">
+      <ProgressBars campaign={campaign} />
       <div className="grid grid-cols-6 gap-px overflow-hidden rounded-sm border border-line bg-line">
         {COUNTERS.map((c) => {
           const value = summary ? summary[c.key] : 0;
@@ -167,7 +184,7 @@ export function PipelineOverview() {
       >
         <ol className="flex items-center px-3 py-2">
           {PHASES.map((phase, i) => {
-            const current = running && i === phaseIndex;
+            const current = (running && i === phaseIndex) || (awaitingOk && phase.key === "AWAITING_OK");
             const done = i <= doneThrough;
             return (
               <li key={phase.key} className="flex flex-1 items-center gap-2">

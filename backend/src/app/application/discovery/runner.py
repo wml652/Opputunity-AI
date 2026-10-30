@@ -68,6 +68,17 @@ from app.domain.discovery.playbook import (
     fetch_error_code,
     normalize_url,
 )
+from app.domain.discovery.progress import (
+    EXTRACT_DONE,
+    EXTRACT_QUEUED,
+    PAGES_BUDGET,
+    PAGES_FETCHED,
+    STAGE_DONE,
+    STAGE_READY,
+    STAGE_TARGET,
+    CampaignProgress,
+    campaign_progress,
+)
 from app.domain.discovery.rag_filter import (
     INTENT_QUERY,
     MIN_FILTER_CHARS,
@@ -131,6 +142,7 @@ VISION_INSTRUCTION = (
 MIN_FOLLOWABLE_CARDS = 3  # a listing with fewer followable cards is extracted directly
 KNOWN_TITLES_LIMIT = 2_000
 CANCEL_POLL_S = 0.5
+PROGRESS_INTERVAL_S = 1.5  # campaign.progress events at most this often (plus every phase change)
 QUEUE_SIZE = 64
 
 _LOGIN_WALL = re.compile(
@@ -158,6 +170,8 @@ class CampaignRun:
         self.c = campaign
         self.user = campaign.user_id
         self.counters = {**empty_counters(), **campaign.counters}
+        self.phase_value = campaign.phase.value
+        self.progress_at = 0.0
         self.playbooks: dict[str, DomainPlaybook] = {}
         self.dirty: set[str] = set()
         self.pb_lock = asyncio.Lock()
@@ -208,6 +222,8 @@ class CampaignRun:
 
     async def _state(self, **kwargs: Any) -> None:
         phase: CampaignPhase | None = kwargs.get("phase")
+        if phase is not None:
+            self.phase_value = phase.value
         async with self.deps.uow_factory(self.user) as uow:
             await uow.campaigns.update_state(
                 self.user, self.c.id, counters=dict(self.counters), **kwargs
@@ -223,6 +239,7 @@ class CampaignRun:
                 }
                 if kwargs.get("error"):
                     payload["error"] = kwargs["error"]
+                payload["progress"] = self._progress_view(None, phase.value).to_dict()
             await uow.events.append(
                 NewEvent(
                     user_id=self.user,
@@ -380,6 +397,7 @@ class CampaignRun:
         workers: list[asyncio.Task[None]] = []
         try:
             await self.prepare()
+            self.counters[PAGES_BUDGET] = max(self.counters[PAGES_BUDGET], self._page_budget())
             n = max(1, min(4, self.c.settings.extraction_workers))
             workers = [asyncio.create_task(self._consume(i)) for i in range(n)]
             await self._produce()
@@ -424,17 +442,69 @@ class CampaignRun:
                 await watcher
 
     async def _auto_stage(self) -> None:
-        """Opt-in: prepare the top-N queued applications up to the final OK gate (never
-        submitting: each still needs the human "OK - Verify & Submit")."""
+        """Fill this campaign's closest-deadline queued applications up to the final OK gate and
+        wait for the filler (phase FILLING), so the campaign completes only after its staging
+        pass. Never submits: each staged application still needs the human OK."""
         if not self.c.settings.auto_stage or self.deps.auto_stage is None:
             return
+        await self._state(phase=CampaignPhase.FILLING)
+
+        async def progress(done: int, total: int, current: str | None) -> None:
+            self.counters[STAGE_TARGET], self.counters[STAGE_DONE] = total, done
+            await self._progress(f"filling {current}" if current else None, force=True)
+            await self.check_cancelled()
+
         try:
-            started = await self.deps.auto_stage(self.user, self.c.settings.auto_stage_limit)
+            states = await self.deps.auto_stage(
+                self.user, self.c.id, self.c.settings.auto_stage_limit, progress
+            )
         except DomainError as exc:
             self.log("auto_stage_failed", error=exc.message)
             return
-        self.log("auto_stage", started=[str(a) for a in started])
-        await self._event("applications.auto_staged", {"count": len(started)})
+        self.counters[STAGE_READY] = states.get("AWAITING_FINAL_VERIFICATION", 0)
+        self.log("auto_stage", states=states)
+        await self._event(
+            "applications.auto_staged", {"count": sum(states.values()), "states": states}
+        )
+        if self.counters[STAGE_READY]:
+            await self._state(phase=CampaignPhase.AWAITING_OK)
+
+    def _page_budget(self) -> int:
+        """Upper estimate of the pages this run may fetch (for the progress bar)."""
+        st = self.c.settings
+        budget = 0
+        for source in self.c.sources:
+            if not source.enabled:
+                continue
+            if source.source_type is SourceType.WEBSITE:
+                budget += st.max_pages_per_site
+            elif source.source_type is SourceType.WEB_SEARCH:
+                budget += min(
+                    st.max_search_queries * st.search_results_per_query, st.max_search_pages
+                )
+            else:
+                budget += 10
+        return budget + st.max_detail_pages
+
+    def _progress_view(self, detail: str | None, phase: str | None = None) -> CampaignProgress:
+        return campaign_progress(
+            phase or self.phase_value,
+            self.counters,
+            auto_stage=self.c.settings.auto_stage and self.deps.auto_stage is not None,
+            detail=detail,
+        )
+
+    async def _progress(self, detail: str | None, *, force: bool = False) -> None:
+        """Throttled `campaign.progress` SSE event carrying both progress bars."""
+        now = time.monotonic()
+        if not force and now - self.progress_at < PROGRESS_INTERVAL_S:
+            return
+        self.progress_at = now
+        await self._event("campaign.progress", self._progress_view(detail).to_dict())
+
+    async def _enqueue(self, page: CrawledPage) -> None:
+        self.counters[EXTRACT_QUEUED] += 1
+        await self.queue.put(page)
 
     async def _stop_workers(self, workers: list[asyncio.Task[None]]) -> None:
         for task in workers:
@@ -798,7 +868,7 @@ class CampaignRun:
                 discovery_query=keyword,
             )
             if await self._save_page(page):
-                await self.queue.put(page)
+                await self._enqueue(page)
 
     # -- fetch -> page ---------------------------------------------------------------------------
 
@@ -1050,7 +1120,7 @@ class CampaignRun:
             enriched = await self._vision_parse(page, fetched.screenshot)
             if enriched is not None:
                 if await self._save_page(enriched):
-                    await self.queue.put(enriched)
+                    await self._enqueue(enriched)
                 return
         if page.status is not CrawlStatus.DISTILLED or processed is None:
             await self._save_page(page)
@@ -1066,7 +1136,7 @@ class CampaignRun:
             return  # identical content already stored in this campaign
         if processed.kind == PageKind.MIXED and hub_cards:
             self._queue_details(page, hub_cards, source_id)
-        await self.queue.put(page)
+        await self._enqueue(page)
 
     # -- hub harvesting --------------------------------------------------------------------------
 
@@ -1145,6 +1215,7 @@ class CampaignRun:
         async with self.deps.uow_factory(self.user) as uow:
             inserted = await uow.pages.add(page)
             if inserted:
+                self.counters[PAGES_FETCHED] += 1
                 if page.status in (CrawlStatus.DISTILLED, CrawlStatus.EXTRACTED):
                     self.counters["websites_crawled"] += 1
                 elif page.status is CrawlStatus.BLOCKED_SSRF:
@@ -1188,6 +1259,8 @@ class CampaignRun:
             trace=page.trace,
             inserted=inserted,
         )
+        if inserted:
+            await self._progress(f"crawled {page.final_url}")
         return inserted
 
     async def persist_page(self, page: CrawledPage) -> None:
@@ -1215,10 +1288,13 @@ class CampaignRun:
                 found = await self.extract_page(page)
                 eligible = await self.evaluate(found)
                 await self.enqueue_applications(eligible)
+                self.counters[EXTRACT_DONE] += 1
+                await self._progress(f"extracted {page.final_url or page.url}")
             except (CampaignCancelledError, asyncio.CancelledError):
                 raise
             except Exception as exc:  # noqa: BLE001 - one page never stops a worker
                 self.log("extraction_error", worker=worker, url=page.url, error=repr(exc)[:300])
+                self.counters[EXTRACT_DONE] += 1
                 page.status = CrawlStatus.FAILED
                 page.error_stage, page.error_code = Stage.LLM_EXTRACTION.value, "internal_error"
                 page.error = page.error_detail = f"extraction crashed: {type(exc).__name__}"
@@ -1634,7 +1710,7 @@ class CampaignRun:
             trace=trace.steps,
         )
         if await self._save_page(page):
-            await self.queue.put(page)
+            await self._enqueue(page)
 
     async def _vision_parse(self, page: CrawledPage, screenshot: bytes) -> CrawledPage | None:
         """Text-sparse page (posters, image tables): let the USER's vision model read it."""

@@ -109,7 +109,7 @@ async def test_crawler_follows_relevant_links_respects_robots_and_blocks_ssrf(
         async for p in crawler.crawl(
             portal.base + "/",
             ["undergraduate scholarship"],
-            CampaignSettings(max_pages_per_site=25, max_depth=3),
+            CampaignSettings(max_pages_per_site=25, max_depth=3, auto_stage=False),
         )
     ]
     await crawler.aclose()
@@ -153,6 +153,7 @@ async def test_full_campaign_dedupes_evaluates_and_queues_by_deadline(
     created = await user.post(
         "/api/v1/campaigns",
         json={
+            "auto_stage": False,
             "name": "Fixture run",
             "scope": "BOTH",
             "keywords": ["undergraduate scholarship"],
@@ -251,6 +252,7 @@ async def test_full_campaign_dedupes_evaluates_and_queues_by_deadline(
     again = await user.post(
         "/api/v1/campaigns",
         json={
+            "auto_stage": False,
             "keywords": ["undergraduate scholarship"],
             "target_urls": [portal.base + "/"],
             "use_search": False,
@@ -266,7 +268,8 @@ async def test_full_campaign_dedupes_evaluates_and_queues_by_deadline(
 async def test_campaign_validation(dclient: httpx.AsyncClient, portal: Portal) -> None:
     user = await register(dclient, "novalid@example.com")
     no_llm = await user.post(
-        "/api/v1/campaigns", json={"keywords": ["x"], "target_urls": [portal.base + "/"]}
+        "/api/v1/campaigns",
+        json={"auto_stage": False, "keywords": ["x"], "target_urls": [portal.base + "/"]},
     )
     assert no_llm.status_code == 422 and "LLM" in no_llm.json()["error"]["message"]
     await user.post(
@@ -276,6 +279,7 @@ async def test_campaign_validation(dclient: httpx.AsyncClient, portal: Portal) -
     unsafe = await user.post(
         "/api/v1/campaigns",
         json={
+            "auto_stage": False,
             "keywords": ["x"],
             "target_urls": ["http://169.254.169.254/latest"],
             "use_search": False,
@@ -284,7 +288,13 @@ async def test_campaign_validation(dclient: httpx.AsyncClient, portal: Portal) -
     assert unsafe.status_code == 422
     nothing = await user.post(
         "/api/v1/campaigns",
-        json={"keywords": ["x"], "use_websites": False, "use_search": False, "use_linkedin": False},
+        json={
+            "auto_stage": False,
+            "keywords": ["x"],
+            "use_websites": False,
+            "use_search": False,
+            "use_linkedin": False,
+        },
     )
     assert nothing.status_code == 422
 
@@ -296,6 +306,7 @@ async def test_discovery_is_tenant_isolated(
     created = await alice.post(
         "/api/v1/campaigns",
         json={
+            "auto_stage": False,
             "keywords": ["scholarship"],
             "target_urls": [portal.base + "/"],
             "use_search": False,
@@ -352,6 +363,7 @@ async def test_campaign_streams_phases_and_counters_over_sse(
                 created = await user.post(
                     "/api/v1/campaigns",
                     json={
+                        "auto_stage": False,
                         "keywords": ["undergraduate scholarship"],
                         "target_urls": [portal.base + "/"],
                         "use_search": False,
@@ -411,7 +423,9 @@ async def test_playwright_backed_crawl_of_portal(portal: Portal) -> None:
     pages = [
         p
         async for p in crawler.crawl(
-            portal.base + "/", ["scholarship"], CampaignSettings(max_pages_per_site=25, max_depth=3)
+            portal.base + "/",
+            ["scholarship"],
+            CampaignSettings(max_pages_per_site=25, max_depth=3, auto_stage=False),
         )
     ]
     await crawler.aclose()

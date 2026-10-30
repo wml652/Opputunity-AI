@@ -5,6 +5,28 @@ export type Outcome = z.infer<typeof outcomeEnum>;
 export const scopeEnum = z.enum(["LOCAL", "INTERNATIONAL", "BOTH"]);
 export type Scope = z.infer<typeof scopeEnum>;
 
+export const progressSchema = z.object({
+  phase: z.string(),
+  current: z.object({
+    label: z.string(),
+    detail: z.string().nullable(),
+    done: z.number(),
+    total: z.number(),
+    pct: z.number(),
+  }),
+  overall_pct: z.number(),
+  crawled_pct: z.number(),
+  evaluated_pct: z.number(),
+  staged_pct: z.number(),
+  crawled: z.number(),
+  evaluated: z.number(),
+  found: z.number(),
+  staged: z.number(),
+  stage_target: z.number(),
+  auto_stage: z.boolean(),
+});
+export type ProgressT = z.infer<typeof progressSchema>;
+
 export const campaignSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -19,6 +41,7 @@ export const campaignSchema = z.object({
   started_at: z.string().nullable(),
   finished_at: z.string().nullable(),
   sources: z.array(z.object({ id: z.string(), source_type: z.string(), url: z.string().nullable() })),
+  progress: progressSchema.optional(),
 });
 export type CampaignT = z.infer<typeof campaignSchema>;
 

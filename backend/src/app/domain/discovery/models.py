@@ -32,6 +32,8 @@ class CampaignPhase(enum.StrEnum):
     EXTRACTING = "EXTRACTING"
     EVALUATING = "EVALUATING"
     QUEUED = "QUEUED"
+    FILLING = "FILLING"  # auto-stage: filling eligible applications up to the OK gate
+    AWAITING_OK = "AWAITING_OK"  # staged applications are waiting for the human OK
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -61,6 +63,14 @@ COUNTER_KEYS = (
     "hubs_harvested",
     "cards_harvested",
     "details_queued",
+    # progress (see domain.discovery.progress)
+    "pages_budget",
+    "pages_fetched",
+    "extract_queued",
+    "extract_done",
+    "stage_target",
+    "stage_done",
+    "stage_ready",
 )
 
 
@@ -80,9 +90,10 @@ class CampaignSettings:
     max_details_per_hub: int = 12
     max_detail_pages: int = 60
     extraction_workers: int = 2  # concurrent extraction + eligibility consumers
-    # Opt-in: after the campaign, prepare the top-N queued applications up to the final OK gate.
-    auto_stage: bool = False
-    auto_stage_limit: int = 5
+    # After extraction, fill this campaign's closest-deadline queued applications up to the final
+    # OK gate (never submitting) before the campaign completes. On by default; opt out per run.
+    auto_stage: bool = True
+    auto_stage_limit: int = 10
 
     def validate(self) -> None:
         if not 1 <= self.max_pages_per_site <= 100:

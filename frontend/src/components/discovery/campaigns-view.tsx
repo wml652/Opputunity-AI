@@ -9,6 +9,8 @@ import { cn, formatRelative } from "@/lib/cn";
 import { useCampaign, useCampaigns, useCancelCampaign } from "@/lib/discovery-queries";
 import type { CampaignT } from "@/lib/discovery-schemas";
 
+import { ProgressBars } from "@/components/pipeline/progress-bars";
+
 import { CampaignLauncher } from "./campaign-launcher";
 import { CrawlInspector } from "./crawl-inspector";
 
@@ -37,6 +39,7 @@ export function CampaignsView() {
 
   return (
     <div className="flex flex-col gap-3">
+      <ProgressBars campaign={campaigns?.find((c) => c.id === active) ?? null} />
       <CampaignLauncher onLaunched={setSelected} />
       <div className="grid grid-cols-5 gap-3">
         <Panel title="Campaigns" meta={campaigns ? `${campaigns.length}` : undefined} className="col-span-2">

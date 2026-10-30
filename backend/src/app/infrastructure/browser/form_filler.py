@@ -9,6 +9,11 @@ and report READY_TO_SUBMIT.
 Resume: restore storage_state and open the checkpoint URL. If the step's DOM fingerprint still
 matches, continue there; if the portal lost the draft (fingerprint differs / redirected to the
 start), replay from step 0 - the resolver returns the settled values for every earlier field.
+Landing pages: when the portal URL is an overview / directory page (no application form,
+only lead-capture, newsletter, search or comment forms), the filler follows up to
+MAX_ENTRY_HOPS high-confidence "Apply now" / "Official website" links to the real form; the
+checkpoint then records the form's URL. Lead / newsletter / search / comment forms are never
+filled - the student's details only ever go into the application form itself.
 All browser traffic goes through the SSRF egress proxy.
 """
 
@@ -50,9 +55,18 @@ log = get_logger(__name__)
 
 MAX_STEPS = 12
 NAV_TIMEOUT_MS = 30_000
-NEXT_RE = re.compile(r"\b(next|continue|proceed|save (and|&) continue|forward)\b", re.I)
+NEXT_RE = re.compile(
+    r"\b(next|continue|proceed|save (and|&) (continue|next)|forward|next step)\b", re.I
+)
 SUBMIT_RE = re.compile(r"\b(submit|send application|apply now|finish)\b", re.I)
 CAPTCHA_RE = re.compile(r"(g-recaptcha|hcaptcha|cf-turnstile|captcha)", re.I)
+MAX_ENTRY_HOPS = 2
+MIN_PARTIAL_TEXT = 500  # a timed-out navigation is usable if the page shows this much text
+ENTRY_LINK_MIN_SCORE = 5
+NO_FORM_ERROR = (
+    "no application form found: this looks like an information or directory page and no "
+    "'Apply now' / 'Official website' link led to a form - open it and find the official portal"
+)
 LOGIN_WALL_ERROR = (
     'the portal asks you to sign in; use "Sign In in Browser & Resume" - automation never '
     "types passwords"
@@ -67,42 +81,201 @@ async def _is_login_wall(page: Any) -> bool:
 
 TRUTHY = {"yes", "true", "1", "on", "y", "agree", "i agree"}
 
+# Groups visible controls by their form (or the page), drops forms that are not applications
+# (search, newsletter, lead capture / counselling, comments, contact) and marks the largest
+# remaining group as the scope (data-ootg-scope) for scanning and buttons. Also picks up ARIA
+# textbox / combobox / checkbox / switch widgets and contenteditable boxes.
+SCOPE_JS = r"""
+() => {
+  const CONTROL = 'input, select, textarea, [contenteditable="true"], [contenteditable=""], ' +
+    '[role=textbox], [role=combobox], [role=checkbox], [role=switch]';
+  const SKIP_TYPES = ['hidden', 'submit', 'button', 'reset', 'image', 'search'];
+  const NOT_APPLICATION = /\b(newsletter|subscri(be|ption)|alerts?|counsel+ing|consultation|consultant|expert advice|advice|get help|free (advice|session|assessment|guidance)|book (a )?(call|session|consultation)|call ?back|request (a )?(call|callback|info|information|brochure)|enquir\w*|inquir\w*|contact( us)?|get in touch|leave a (reply|comment)|post comment|comments?|search)\b/i;
+  const SIDE = /(^|[\s_-])(side|sidebar|side-?form|widget|modal|popup|pop-up|overlay|footer|newsletter|subscri\w*|banner|cta|inquiry|enquiry|lead|chat)([\s_-]|$)/i;
+  const APPLICATION = /\b(application|apply|applicant|candidate|enrol+ment|registration form|admission form)\b/i;
+  const visible = (el) => {
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden' && (el.offsetParent !== null || s.position === 'fixed');
+  };
+  const BUTTON = 'button, input[type=submit], input[type=button], [role=button]';
+  // Loose controls (no <form>): group them by their nearest widget container - the closest
+  // ancestor that also holds a heading or a button - instead of lumping the whole page together.
+  const widget = (el) => {
+    for (let n = el.parentElement, depth = 0; n && n !== document.body && depth < 8; n = n.parentElement, depth++) {
+      if (n.querySelector('h1, h2, h3, h4, legend, [role=heading]') || n.querySelector(BUTTON)) return n;
+    }
+    return document.body;
+  };
+  document.querySelectorAll('[data-ootg-scope]').forEach((e) => e.removeAttribute('data-ootg-scope'));
+  document.querySelectorAll('[data-ootg-excluded]').forEach((e) => e.removeAttribute('data-ootg-excluded'));
+  const groups = new Map();
+  for (const el of document.querySelectorAll(CONTROL)) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (SKIP_TYPES.includes(t)) continue;
+      if (t !== 'file' && !visible(el)) continue;
+    } else if (!visible(el)) continue;
+    if (!['input', 'select', 'textarea'].includes(tag) && el.closest('input, select, textarea')) continue;
+    const form = el.form || el.closest('form, [role=form]');
+    const box = form || widget(el);
+    if (!groups.has(box)) groups.set(box, { form: !!form, els: [] });
+    groups.get(box).els.push(el);
+  }
+  const summaries = [];
+  let best = null; let bestScore = -1;
+  for (const [box, group] of groups) {
+    const els = group.els;
+    // Judge a form by its name, action, container and nearest heading - not by its field labels
+    // (an application may well ask for "comments").
+    let heading = '';
+    for (let n = box; n && n !== document.documentElement && !heading; n = n.parentElement) {
+      const h = n.querySelector('h1, h2, h3, h4, legend, [role=heading]');
+      if (h) heading = h.innerText || '';
+    }
+    const buttons = [...box.querySelectorAll(BUTTON)].map((b) => [b.id, b.innerText || b.value || ''].join(' ')).join(' ');
+    const head = [box.getAttribute('aria-label'), box.id, box.className && String(box.className),
+                  box.getAttribute('action'), box.getAttribute('role'), heading, buttons,
+                  (box.innerText || '').slice(0, 120)].filter(Boolean).join(' ');
+    let sided = false;
+    for (let n = box; n && n !== document.body; n = n.parentElement) {
+      const tag = n.tagName.toLowerCase();
+      if (['aside', 'footer', 'nav', 'header', 'dialog'].includes(tag) || n.getAttribute('role') === 'dialog' ||
+          n.getAttribute('aria-modal') === 'true' || SIDE.test(`${n.id} ${n.className && String(n.className)}`)) { sided = true; break; }
+    }
+    const single = els.length <= 1;
+    const searchy = box.getAttribute('role') === 'search' ||
+      (single && els.every((e) => ['q', 's', 'search', 'query'].includes((e.name || '').toLowerCase())));
+    const looksApp = APPLICATION.test(head);
+    const excluded =
+      searchy ||
+      (NOT_APPLICATION.test(head) && !looksApp) ||
+      (sided && !looksApp) ||
+      // Loose controls outside any <form> need positive evidence of being an application.
+      (!group.form && !looksApp) ||
+      (box === document.body && single);
+    summaries.push({ controls: els.length, excluded, form: group.form, label: head.slice(0, 80) });
+    if (excluded) { if (box !== document.body) box.setAttribute('data-ootg-excluded', '1'); continue; }
+    const score = els.length + (looksApp ? 5 : 0) + (group.form ? 1 : 0);
+    if (score > bestScore) { best = box; bestScore = score; }
+  }
+  if (best) best.setAttribute('data-ootg-scope', '1');
+  return { scoped: !!best, groups: summaries };
+}
+"""
+
 SCAN_JS = r"""
 () => {
+  const scope = document.querySelector('[data-ootg-scope]');
+  if (!scope) return [];
   const labelFor = (el) => {
     if (el.id) { const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (l) return l.innerText.trim(); }
     const parent = el.closest('label'); if (parent) return parent.innerText.trim();
-    return el.getAttribute('aria-label') || el.placeholder || el.name || '';
+    const by = el.getAttribute('aria-labelledby');
+    if (by) { const t = by.split(/\s+/).map((i) => document.getElementById(i)?.innerText.trim() || '').join(' ').trim(); if (t) return t; }
+    return el.getAttribute('aria-label') || el.placeholder || el.getAttribute('data-placeholder') || el.name || el.title || '';
   };
-  const visible = (el) => { const s = getComputedStyle(el); return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetParent !== null; };
-  const out = []; const seen = new Set();
-  for (const el of document.querySelectorAll('input, select, textarea')) {
+  const visible = (el) => {
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden' && (el.offsetParent !== null || s.position === 'fixed');
+  };
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 60);
+  const inScope = (el) => scope === document.body || scope.contains(el) || (el.form && el.form === scope);
+  const out = []; const seen = new Set(); let anon = 0;
+  const all = document.querySelectorAll('input, select, textarea, [contenteditable="true"], [contenteditable=""], [role=textbox], [role=combobox], [role=checkbox], [role=switch]');
+  for (const el of all) {
+    if (!inScope(el)) continue;
     const tag = el.tagName.toLowerCase();
-    const type = tag === 'input' ? (el.getAttribute('type') || 'text').toLowerCase() : tag;
-    if (['hidden', 'submit', 'button', 'reset', 'image'].includes(type)) continue;
-    const key = el.name || el.id; if (!key || seen.has(key)) continue;
+    const native = ['input', 'select', 'textarea'].includes(tag);
+    if (!native && el.closest('input, select, textarea')) continue;
+    let type;
+    if (native) {
+      type = tag === 'input' ? (el.getAttribute('type') || 'text').toLowerCase() : tag;
+      if (['hidden', 'submit', 'button', 'reset', 'image', 'search', 'password'].includes(type)) continue;
+    } else {
+      const role = el.getAttribute('role');
+      type = role === 'checkbox' || role === 'switch' ? 'checkbox' : role === 'combobox' ? 'combobox' : 'textarea';
+    }
     if (type !== 'file' && !visible(el)) continue;
+    const label = labelFor(el);
+    let key = el.name || el.id || (label ? 'aria_' + slug(label) : '');
+    if (!key) key = 'control_' + (anon++);
+    if (seen.has(key)) continue;
     seen.add(key);
+    let selector;
+    if (el.name) selector = `[name="${CSS.escape(el.name)}"]`;
+    else if (el.id) selector = `[id="${CSS.escape(el.id)}"]`;
+    else { el.setAttribute('data-ootg-key', key); selector = `[data-ootg-key="${CSS.escape(key)}"]`; }
+    const required = !!el.required || el.getAttribute('aria-required') === 'true';
     if (type === 'radio') {
       const group = [...document.querySelectorAll(`input[type=radio][name="${CSS.escape(key)}"]`)];
       const fs = el.closest('fieldset'); const legend = fs && fs.querySelector('legend');
-      out.push({ key, type: 'radio', label: legend ? legend.innerText.trim() : key,
+      out.push({ key, selector, type: 'radio', label: legend ? legend.innerText.trim() : key,
                  options: group.map((r) => labelFor(r) || r.value), required: group.some((r) => r.required),
                  maxLength: null, accept: null });
       continue;
     }
-    out.push({ key, type: tag === 'select' ? 'select' : type, label: labelFor(el),
+    out.push({ key, selector, type: tag === 'select' ? 'select' : type, label,
                options: tag === 'select' ? [...el.options].filter((o) => o.value !== '').map((o) => o.text.trim()) : [],
-               required: !!el.required, maxLength: el.maxLength > 0 ? el.maxLength : null, accept: el.accept || null });
+               required, maxLength: el.maxLength > 0 ? el.maxLength : null, accept: el.accept || null });
   }
   return out;
 }
 """
 
 BUTTONS_JS = r"""
-() => [...document.querySelectorAll('button, input[type=submit]')]
-  .filter((b) => b.offsetParent !== null && !b.disabled)
-  .map((b, i) => { b.setAttribute('data-ootg-btn', String(i)); return { i, text: (b.innerText || b.value || '').trim() }; })
+() => {
+  const scope = document.querySelector('[data-ootg-scope]') || document.body;
+  // Buttons of excluded forms / widgets (lead capture, newsletter, search) and of sidebars,
+  // footers and dialogs are never Next or Submit for the application.
+  const foreign = (b) => b.closest('[data-ootg-excluded], aside, footer, nav, header, dialog, [role=dialog], [aria-modal=true]') && !b.closest('[data-ootg-scope]');
+  const visible = (b) => b.offsetParent !== null && !b.disabled && b.getAttribute('aria-disabled') !== 'true' && !foreign(b);
+  const pick = (root) => [...root.querySelectorAll('button, input[type=submit], input[type=button], [role=button]')].filter(visible);
+  let found = pick(scope);
+  if (!found.length && scope !== document.body) {
+    // SPA layouts often keep Next / Submit outside the <form>: page buttons not inside other forms.
+    found = pick(document.body).filter((b) => !b.closest('form') || b.closest('form') === scope);
+  }
+  return found.map((b, i) => {
+    b.setAttribute('data-ootg-btn', String(i));
+    return { i, text: (b.innerText || b.value || b.getAttribute('aria-label') || '').trim() };
+  });
+}
+"""
+
+# Best "Apply now" / "Official website" entry point on an overview page (links or buttons).
+ENTRY_LINKS_JS = r"""
+() => {
+  const STRONG = [
+    [/\b(apply now|apply online|apply here|apply today|start (your |an |the )?application|begin (your )?application|online application|application form|application portal|apply for this|submit an application)\b/i, 10],
+    [/\b(official (website|site|link|portal|page)|visit (the )?official|go to (the )?official|program(me)? website|university website)\b/i, 8],
+    [/^\s*apply\s*$/i, 7],
+    [/\b(register now|sign up to apply|create (an )?account to apply)\b/i, 5],
+  ];
+  const BAD = /\b(share|tweet|facebook|whatsapp|linkedin|telegram|pinterest|print|email this|subscribe|newsletter|comment|login|log in|sign in|how to apply|related|previous|next post)\b/i;
+  const here = location.href.split('#')[0];
+  const out = [];
+  let i = 0;
+  for (const el of document.querySelectorAll('a[href], button, [role=button], [role=link], input[type=button]')) {
+    if (el.offsetParent === null) continue;
+    const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').trim().replace(/\s+/g, ' ');
+    if (!text || text.length > 80 || BAD.test(text)) continue;
+    let score = 0;
+    for (const [re, w] of STRONG) if (re.test(text)) { score = Math.max(score, w); }
+    if (!score) continue;
+    const href = el.tagName.toLowerCase() === 'a' ? el.href : '';
+    if (href) {
+      if (/^(mailto|tel|javascript):/i.test(href)) continue;
+      if (href.split('#')[0] === here) continue;
+      try { if (new URL(href).host !== location.host) score += 1; } catch (e) { continue; }
+    }
+    el.setAttribute('data-ootg-entry', String(i));
+    out.push({ i, text, href, score });
+    i += 1;
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, 5);
+}
 """
 
 
@@ -169,7 +342,7 @@ class PlaywrightFormFiller:
         step_index, replayed = 0, False
         ledger: list[dict[str, Any]] = []
         if resume is not None:
-            await page.goto(resume.url, wait_until="domcontentloaded")
+            await _goto(page, resume.url)
             fields = await _scan(page)
             if fields and dom_fingerprint(fields) == resume.dom_fingerprint:
                 step_index = resume.step_index
@@ -179,12 +352,12 @@ class PlaywrightFormFiller:
                 log_lines.append(
                     "portal lost the draft; replaying from step 1 using the fill ledger"
                 )
-                await page.goto(portal_url, wait_until="domcontentloaded")
+                await _goto(page, portal_url)
         else:
-            await page.goto(portal_url, wait_until="domcontentloaded")
+            await _goto(page, portal_url)
 
-        completed = 0
-        for _ in range(MAX_STEPS):
+        completed = hops = 0
+        for _ in range(MAX_STEPS + MAX_ENTRY_HOPS):
             html = await page.content()
             if CAPTCHA_RE.search(html):
                 return await self._outcome(
@@ -212,7 +385,16 @@ class PlaywrightFormFiller:
                 )
             fields = await _scan(page)
             buttons = await page.evaluate(BUTTONS_JS)
-            if not fields and not buttons:
+            has_nav = any(NEXT_RE.search(b["text"]) or SUBMIT_RE.search(b["text"]) for b in buttons)
+            if (not fields or not has_nav) and completed == 0 and hops < MAX_ENTRY_HOPS:
+                hopped = await _follow_entry_link(page, context, self._guard)
+                if hopped is not None:
+                    page, note = hopped
+                    hops += 1
+                    page.set_default_timeout(NAV_TIMEOUT_MS)
+                    log_lines.append(note)
+                    continue
+            if not fields and not has_nav:
                 return await self._outcome(
                     FillOutcomeKind.BLOCKED,
                     page,
@@ -222,7 +404,7 @@ class PlaywrightFormFiller:
                     replayed,
                     completed,
                     log_lines,
-                    error="no application form found on the page",
+                    error=NO_FORM_ERROR,
                 )
             resolutions = await resolver(step_index, fields)
             unresolved: list[UnresolvedField] = []
@@ -274,6 +456,20 @@ class PlaywrightFormFiller:
                 completed += 1
                 log_lines.append(f"completed step {step_index}")
                 continue
+            if submit_btn is not None and not fields and not ledger:
+                # A Submit button without any application field filled anywhere (e.g. a
+                # directory page's inquiry widget) is not an application's final step.
+                return await self._outcome(
+                    FillOutcomeKind.BLOCKED,
+                    page,
+                    context,
+                    step_index,
+                    ledger,
+                    replayed,
+                    completed,
+                    log_lines,
+                    error=NO_FORM_ERROR,
+                )
             if submit_btn is not None:
                 log_lines.append(
                     f"reached the final step ({step_index + 1}); stopping before '{submit_btn['text']}'"
@@ -369,7 +565,21 @@ class PlaywrightFormFiller:
         paths: dict[uuid.UUID, str],
         log_lines: list[str],
     ) -> SubmitOutcome:
-        await page.goto(portal_url, wait_until="domcontentloaded")
+        await _goto(page, portal_url)
+        for _ in range(MAX_ENTRY_HOPS):  # landing page -> the application form, as when filling
+            if await _is_login_wall(page) or CAPTCHA_RE.search(await page.content()):
+                break
+            fields = await _scan(page)
+            buttons = await page.evaluate(BUTTONS_JS)
+            if fields and any(
+                NEXT_RE.search(b["text"]) or SUBMIT_RE.search(b["text"]) for b in buttons
+            ):
+                break
+            hopped = await _follow_entry_link(page, page.context, self._guard)
+            if hopped is None:
+                break
+            page, note = hopped
+            log_lines.append(note)
         observed: list[PreviewValue] = []
         seen: set[str] = set()
         for step_index in range(MAX_STEPS):
@@ -433,10 +643,12 @@ class PlaywrightFormFiller:
                         await page.click(f'[data-ootg-btn="{next_btn["i"]}"]')
                 log_lines.append(f"step {step_index + 1} verified")
                 continue
-            if submit_btn is None:
+            if submit_btn is None or (not fields and not seen):
                 return SubmitOutcome(
                     SubmitOutcomeKind.BLOCKED,
-                    error="no Next or Submit button on this step",
+                    error="no Next or Submit button on this step"
+                    if submit_btn is None
+                    else NO_FORM_ERROR,
                     log=log_lines,
                 )
             missing = sorted(set(approved) - seen)
@@ -535,14 +747,67 @@ class PlaywrightFormFiller:
         )
 
 
+async def _goto(page: Any, url: str) -> None:
+    """Navigate; heavy pages (ads, trackers, megabyte HTML) may never reach DOMContentLoaded in
+    time through the egress proxy - if the page already shows content, work with it."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded")
+    except Exception as exc:
+        if type(exc).__name__ != "TimeoutError":
+            raise
+        with contextlib.suppress(Exception):
+            await page.wait_for_selector("body", timeout=5_000)
+        text_len = 0
+        with contextlib.suppress(Exception):
+            text_len = int(await page.evaluate("() => (document.body?.innerText || '').length"))
+        if text_len < MIN_PARTIAL_TEXT:
+            raise
+        log.info("goto_partial", url=url, text_chars=text_len)
+
+
+async def _follow_entry_link(page: Any, context: Any, guard: SsrfGuard) -> tuple[Any, str] | None:
+    """Follow the best "Apply now" / "Official website" link or button. Returns the (possibly
+    new) page and a description, or None if there is no confident entry point."""
+    candidates = await page.evaluate(ENTRY_LINKS_JS)
+    for cand in candidates:
+        if int(cand["score"]) < ENTRY_LINK_MIN_SCORE:
+            break
+        href = str(cand.get("href") or "")
+        try:
+            if href:
+                await guard.validate(href)
+                await _goto(page, href)
+                return page, f"followed '{cand['text']}' -> {page.url}"
+            before = len(context.pages)
+            with contextlib.suppress(Exception):
+                async with page.expect_navigation(
+                    wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS // 3
+                ):
+                    await page.click(f'[data-ootg-entry="{cand["i"]}"]')
+            if len(context.pages) > before:  # the button opened the portal in a new tab
+                page = context.pages[-1]
+                await page.wait_for_load_state("domcontentloaded")
+            return page, f"clicked '{cand['text']}' -> {page.url}"
+        except Exception as exc:  # noqa: BLE001 - try the next candidate
+            log.info("entry_link_failed", text=cand["text"], error=type(exc).__name__)
+    return None
+
+
+async def _scope(page: Any) -> bool:
+    """Mark the application form on the page; False if there is none."""
+    result = await page.evaluate(SCOPE_JS)
+    return bool(result.get("scoped"))
+
+
 async def _scan(page: Any) -> list[FormField]:
+    await _scope(page)
     raw = await page.evaluate(SCAN_JS)
     return [
         FormField(
             key=str(r["key"]),
             label=str(r["label"] or r["key"])[:500],
             field_type=str(r["type"]),
-            selector=f'[name="{r["key"]}"]',
+            selector=str(r.get("selector") or f'[name="{r["key"]}"]'),
             options=[str(o) for o in r.get("options") or []],
             required=bool(r.get("required")),
             max_length=r.get("maxLength"),
@@ -553,8 +818,8 @@ async def _scan(page: Any) -> list[FormField]:
 
 
 READ_JS = r"""
-([name, type]) => {
-  const els = [...document.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
+([selector, type]) => {
+  const els = [...document.querySelectorAll(selector)];
   const el = els[0];
   if (!el) return null;
   if (type === 'select') { const o = el.options[el.selectedIndex]; return o ? JSON.stringify([o.text.trim(), o.value]) : ''; }
@@ -563,7 +828,8 @@ READ_JS = r"""
     const label = (r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`)?.innerText.trim()) || r.closest('label')?.innerText.trim() || r.value;
     return JSON.stringify([label, r.value]);
   }
-  if (type === 'checkbox') return el.checked ? 'on' : '';
+  if (type === 'checkbox') return (el.checked || el.getAttribute('aria-checked') === 'true') ? 'on' : '';
+  if (!('value' in el)) return (el.innerText || '').trim();
   if (type === 'file') return el.files && el.files.length ? el.files[0].name : '';
   return el.value;
 }
@@ -573,7 +839,7 @@ READ_JS = r"""
 async def _read_back(page: Any, f: FormField, expected: str) -> str:
     """What the page REALLY shows for this control, mapped onto the approved representation
     (select/radio: the option label or value; checkbox: truthiness; file: a file is attached)."""
-    raw = await page.evaluate(READ_JS, [f.key, f.field_type])
+    raw = await page.evaluate(READ_JS, [f.selector, f.field_type])
     if raw is None:
         return "(missing)"
     if f.field_type in ("select", "radio"):
@@ -629,6 +895,10 @@ async def _fill(page: Any, f: FormField, res: FieldResolution, paths: dict[uuid.
     elif f.field_type == "checkbox":
         if value.strip().lower() in TRUTHY:
             await page.check(f.selector)
+    elif f.field_type == "combobox":
+        await page.click(f.selector)
+        await page.fill(f.selector, value)
+        await page.keyboard.press("Enter")
     else:
         await page.fill(f.selector, value)
 

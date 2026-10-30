@@ -9,6 +9,7 @@
 Drafts live server-side keyed by a session cookie, so resuming requires the browser's saved
 storage_state; after /__wipe the portal redirects to step 1 and the filler must replay.
 `?v=2` serves the same form under a different opportunity (same custom question).
+`/programme/{slug}` is an overview page whose "Apply Now" button leads to the form.
 `?v=members` sits behind a sign-in wall unless the browser carries the `portal_auth=ok` cookie.
 """
 
@@ -186,6 +187,70 @@ def build_app() -> FastAPI:
         return _page(
             fields["Title"], f"<article>{lines}{prose}</article><p>{html.escape(slug)}</p>"
         )
+
+    @app.get("/programme/{slug}")
+    async def programme(slug: str, request: Request) -> Response:
+        """An overview / directory-style page: the extracted portal URL points HERE, not at the
+        form. It carries a newsletter form, a "free counselling" lead form (both must never be
+        filled) and an "Apply Now" button that leads to the real 3-step form."""
+        STATE.hits["GET /programme"] += 1
+        here = str(request.url).split("?")[0]
+        facts = {
+            "Title": "Zeta Summer Research Programme",
+            "Organization": "Zeta Institute",
+            "Type": "RESEARCH",
+            "Deadline": "2099-07-01",
+            "Degree": "BACHELOR",
+            "Apply": here,
+        }
+        lines = "".join(f"<p>{k}: {html.escape(v)}</p>" for k, v in facts.items())
+        prose = "<p>The Zeta Institute hosts international undergraduates every summer.</p>" * 3
+        body = (
+            f"<article>{lines}{prose}"
+            "<p><a href='#how'>How to apply</a> &middot; "
+            "<a href='https://www.facebook.com/sharer'>Share on Facebook</a></p>"
+            "<p><a class='btn' href='/apply?v=2'>Apply Now</a></p></article>"
+            "<aside><h2>Get Free Counselling</h2><form method='post' action='/lead'>"
+            "<label for='sn'>Full Name *</label><input id='sn' name='StudentName' required>"
+            "<label for='mb'>Your contact number*</label><input id='mb' name='Mobile' required>"
+            "<button type='submit'>Submit</button></form></aside>"
+            # Formless lead widget in the page body, as on real directory sites (studyabroad.pk).
+            "<div class='col-lg-3'><div class='side-form'><h3>Study abroad expert advice</h3>"
+            "<div class='fieldset'>Full Name * <input id='StudentName2' name='LeadName'></div>"
+            "<div class='fieldset'>Your contact number* <input name='LeadMobile'></div>"
+            "<button id='submitInquiry' type='button'>Submit Inquiry</button></div></div>"
+            "<footer><form class='newsletter' method='post' action='/lead'>"
+            "<label for='nl'>Subscribe to our newsletter</label>"
+            "<input id='nl' name='newsletter_email' type='email'>"
+            "<button type='submit'>Subscribe</button></form></footer>"
+        )
+        return _page(facts["Title"], body)
+
+    @app.get("/directory/{slug}")
+    async def directory(slug: str) -> Response:
+        """A scholarship directory listing (like studyabroad.pk/scholarships): a search box and
+        a formless "expert advice" inquiry widget with a Submit button - no application at all."""
+        STATE.hits["GET /directory"] += 1
+        cards = "".join(
+            f"<article><h3><a href='/programme/{i}'>Scholarship {i}</a></h3></article>"
+            for i in range(3)
+        )
+        body = (
+            "<div class='search-box'><select name='level'><option>Bachelor</option>"
+            "<option>Master</option></select><input name='keyword' placeholder='Keyword'>"
+            "<button id='searchScholarshipsBtn' type='button'>Search</button></div>"
+            f"{cards}"
+            "<div class='col-lg-3'><div class='side-form'><h3>Study abroad expert advice</h3>"
+            "<div class='fieldset'>Full Name * <input id='StudentName' name='StudentName'></div>"
+            "<div class='fieldset'>Your contact number* <input name='Mobile'></div>"
+            "<button id='submitInquiry' type='button'>Submit Inquiry</button></div></div>"
+        )
+        return _page(f"Scholarships directory {html.escape(slug)}", body)
+
+    @app.post("/lead")
+    async def lead() -> Response:
+        STATE.hits["POST /lead"] += 1
+        return _page("Thanks", "<p>We will call you.</p>")
 
     @app.post("/__wipe")
     async def wipe() -> Response:
