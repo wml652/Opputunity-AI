@@ -23,6 +23,7 @@ from app.domain.discovery.listing import detail_link_score
 from app.domain.discovery.models import CampaignSettings, FetchedPage, registrable_host
 from app.domain.discovery.playbook import FetchStrategy, Stage, StepStatus
 from app.domain.ports.discovery import FetchedDocument
+from app.domain.ports.system import IBrowserSlots
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.distiller import extract_links
 from app.infrastructure.scraping.fetchers import PageFetcher, PlaywrightFetcher, SafeHttpFetcher
@@ -175,8 +176,10 @@ class SiteCrawlerFactory:
         use_playwright: bool,
         politeness_seconds: float,
         respect_robots: bool = True,
+        slots: IBrowserSlots | None = None,
     ) -> None:
         self._guard = guard
+        self._slots = slots
         self._use_playwright = use_playwright
         self._delay = politeness_seconds
         self._respect_robots = respect_robots
@@ -188,7 +191,7 @@ class SiteCrawlerFactory:
         `screenshots`: capture text-sparse pages for the user's vision model."""
         http = SafeHttpFetcher(self._guard)
         page_fetcher: PageFetcher = (
-            PlaywrightFetcher(self._guard, sessions, screenshots=screenshots)
+            PlaywrightFetcher(self._guard, sessions, screenshots=screenshots, slots=self._slots)
             if self._use_playwright
             else http
         )

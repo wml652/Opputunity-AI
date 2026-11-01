@@ -137,7 +137,11 @@ export function useRepairPortals() {
   });
 }
 
-const teachSchema = z.object({ application_id: z.string().uuid(), url: z.string() });
+const teachSchema = z.object({
+  application_id: z.string().uuid(),
+  url: z.string(),
+  session_id: z.string().uuid().nullable().optional(), // remote browser (server)
+});
 
 /** Teach Mode: open the portal in a visible browser and record a demonstration. */
 export function useTeach() {

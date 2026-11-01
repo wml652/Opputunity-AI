@@ -30,6 +30,7 @@ from app.domain.discovery.playbook import (
     detect_bot_challenge,
 )
 from app.domain.ports.discovery import FetchedDocument
+from app.domain.ports.system import IBrowserSlots
 from app.domain.shared.errors import DnsResolutionError, UnsafeUrlError
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.egress_proxy import EgressProxy
@@ -339,9 +340,12 @@ class PlaywrightFetcher:
         sessions: dict[str, str] | None = None,
         *,
         screenshots: bool = False,
+        slots: IBrowserSlots | None = None,
     ) -> None:
         self._guard = guard
         self._screenshots = screenshots  # only when the user configured a vision model
+        self._slots = slots  # global browser pool: the slot is held while the browser lives
+        self._slot: contextlib.AbstractAsyncContextManager[None] | None = None
         self._proxy = EgressProxy(guard)
         # domain -> storage_state of a browser session the user solved headfully (decrypted)
         self._sessions: dict[str, Any] = {k: json.loads(v) for k, v in (sessions or {}).items()}
@@ -354,6 +358,9 @@ class PlaywrightFetcher:
             if self._browser is None:
                 from playwright.async_api import async_playwright
 
+                if self._slots is not None and self._slot is None:
+                    self._slot = self._slots.slot("auto")
+                    await self._slot.__aenter__()
                 port = await self._proxy.start()
                 self._pw = await async_playwright().start()
                 self._browser = await self._pw.chromium.launch(
@@ -605,6 +612,9 @@ class PlaywrightFetcher:
                 await self._pw.stop()
         await self._proxy.stop()
         self._browser = self._pw = None
+        slot, self._slot = self._slot, None
+        if slot is not None:
+            await slot.__aexit__(None, None, None)
 
 
 def playwright_available() -> bool:

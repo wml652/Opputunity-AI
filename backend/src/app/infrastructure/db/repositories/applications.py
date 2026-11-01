@@ -7,10 +7,11 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.leases import PENDING_OWNER
 from app.domain.applications.filling import (
     ApplicationField,
     Checkpoint,
@@ -154,21 +155,69 @@ class SqlApplicationDetailRepository:
         ).all()
         return [(_app(a), _opp(o)) for a, o in rows]
 
-    async def stale_leases(
-        self, now: datetime, states: Sequence[ApplicationState]
-    ) -> list[tuple[Application, Opportunity]]:
-        rows = (
-            await self._s.execute(
-                select(ApplicationRow, OpportunityRow)
-                .join(OpportunityRow, OpportunityRow.id == ApplicationRow.opportunity_id)
-                .where(
-                    ApplicationRow.state.in_(list(states)),
-                    ApplicationRow.lease_expires_at.is_not(None),
+    async def claim_lease(
+        self,
+        user_id: uuid.UUID,
+        application_id: uuid.UUID,
+        owner: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        result = await self._s.execute(
+            update(ApplicationRow)
+            .where(
+                ApplicationRow.user_id == user_id,
+                ApplicationRow.id == application_id,
+                or_(
+                    ApplicationRow.lock_owner.is_(None),
+                    ApplicationRow.lock_owner == owner,
+                    ApplicationRow.lock_owner == PENDING_OWNER,
+                    ApplicationRow.lease_expires_at.is_(None),
                     ApplicationRow.lease_expires_at < now,
-                )
-                .limit(500)
+                ),
             )
-        ).all()
+            .values(lock_owner=owner, lease_expires_at=expires_at)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def mark_resumed(
+        self, user_id: uuid.UUID, application_id: uuid.UUID, pending_until: datetime
+    ) -> None:
+        await self._s.execute(
+            update(ApplicationRow)
+            .where(ApplicationRow.user_id == user_id, ApplicationRow.id == application_id)
+            .values(
+                resume_count=ApplicationRow.resume_count + 1,
+                lock_owner=PENDING_OWNER,
+                lease_expires_at=pending_until,
+            )
+        )
+
+    async def stale_leases(
+        self,
+        now: datetime,
+        states: Sequence[ApplicationState],
+        *,
+        spare_pending_after: datetime | None = None,
+    ) -> list[tuple[Application, Opportunity]]:
+        query = (
+            select(ApplicationRow, OpportunityRow)
+            .join(OpportunityRow, OpportunityRow.id == ApplicationRow.opportunity_id)
+            .where(
+                ApplicationRow.state.in_(list(states)),
+                ApplicationRow.lease_expires_at.is_not(None),
+                ApplicationRow.lease_expires_at < now,
+            )
+        )
+        if spare_pending_after is not None:
+            query = query.where(
+                or_(
+                    ApplicationRow.lock_owner.is_(None),
+                    ApplicationRow.lock_owner != PENDING_OWNER,
+                    ApplicationRow.lease_expires_at <= spare_pending_after,
+                )
+            )
+        rows = (await self._s.execute(query.limit(500))).all()
         return [(_app(a), _opp(o)) for a, o in rows]
 
 

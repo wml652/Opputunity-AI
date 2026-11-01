@@ -14,17 +14,23 @@ from arq import cron
 from arq.connections import RedisSettings
 from arq.worker import Worker
 
+from app.application.applications.submission import RunSubmission
+from app.application.applications.use_cases import RunApplication
 from app.application.discovery.use_cases import RunCampaign
 from app.bootstrap.container import (
+    build_application_deps,
     build_discovery_deps,
     build_infrastructure,
     build_maintenance,
     build_relay,
+    build_resume,
+    make_runner_id,
 )
 from app.infrastructure.config.settings import get_settings
 from app.infrastructure.events.outbox_relay import OutboxRelayLoop
 from app.infrastructure.logging import configure_logging, get_logger
 from app.infrastructure.runtime.event_loop import IS_WINDOWS, configure_event_loop, run
+from app.infrastructure.runtime.resources import PsutilResources
 from app.infrastructure.workers.tasks import (
     QUEUES,
     heartbeat,
@@ -32,7 +38,10 @@ from app.infrastructure.workers.tasks import (
     make_worker_id,
     ping,
     relay_outbox,
+    resume_work,
+    run_application,
     run_campaign,
+    run_submission,
 )
 
 log = get_logger(__name__)
@@ -48,14 +57,22 @@ def build_worker(queue_name: str) -> Worker:
             "Redis (Upstash rediss://... or Memurai on Windows)."
         )
     infra = build_infrastructure(settings)
+    infra.runner_id = make_runner_id(queue_name)  # identity in run leases
     relay = build_relay(infra)
     reap_leases, sweep_deadlines = build_maintenance(infra)
     relay_loop: OutboxRelayLoop | None = None
 
     async def on_startup(ctx: dict[str, Any]) -> None:
         nonlocal relay_loop
+        app_deps = build_application_deps(infra)
         ctx.update(
             run_campaign=RunCampaign(build_discovery_deps(infra)),
+            run_application=RunApplication(app_deps),
+            run_submission=RunSubmission(app_deps),
+            resume=build_resume(infra),
+            browser_slots=infra.browser_slots,
+            resources=PsutilResources(),
+            min_free_memory_mb=settings.min_free_memory_mb,
             relay=relay,
             reap_leases=reap_leases,
             sweep_deadlines=sweep_deadlines,
@@ -84,16 +101,30 @@ def build_worker(queue_name: str) -> Worker:
     if queue_name == "system":
         cron_jobs.append(cron(relay_outbox, second={5, 35}, run_at_startup=False))
         cron_jobs.append(cron(maintenance, minute=set(range(0, 60, 5)), run_at_startup=True))
+        # Durable execution: resume runs whose worker died, every minute (and at startup).
+        cron_jobs.append(cron(resume_work, second={20}, run_at_startup=True))
 
     return Worker(
-        functions=[ping, relay_outbox, run_campaign, maintenance],
+        functions=[
+            ping,
+            relay_outbox,
+            run_campaign,
+            run_application,
+            run_submission,
+            maintenance,
+            resume_work,
+        ],
         cron_jobs=cron_jobs,
         queue_name=f"arq:{queue_name}",
         redis_settings=RedisSettings.from_dsn(settings.redis_url),
         on_startup=on_startup,
         on_shutdown=on_shutdown,
         handle_signals=not IS_WINDOWS,
-        max_jobs=4 if queue_name == "browser" else 10,
+        # Browser jobs also wait for a slot in the global pool (MAX_BROWSERS across processes).
+        max_jobs=settings.max_browsers if queue_name == "browser" else 10,
+        # A campaign can run for hours; arq re-runs a job whose worker vanished only after
+        # this, but the resume sweep (run leases) normally restarts it within ~2 minutes.
+        job_timeout=6 * 3600,
         health_check_interval=30,
     )
 

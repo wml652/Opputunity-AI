@@ -17,6 +17,10 @@ from typing import Any
 
 from app.domain.agent.models import StepKind, TeachStep
 from app.domain.ports.agent import StepSink, TeachResult
+from app.domain.ports.hitl import VIEWPORT, HitlSession
+from app.domain.ports.system import IBrowserSlots
+from app.infrastructure.browser.remote_hub import RedisRemoteBrowserHub
+from app.infrastructure.browser.remote_view import RemoteView
 from app.infrastructure.logging import get_logger
 from app.infrastructure.scraping.egress_proxy import EgressProxy
 from app.infrastructure.scraping.fetchers import USER_AGENT
@@ -155,11 +159,19 @@ class PlaywrightTeachRecorder:
     """`driver` (tests only) acts on the page in place of a human, then finishes."""
 
     def __init__(
-        self, guard: SsrfGuard, *, headless: bool = False, driver: Driver | None = None
+        self,
+        guard: SsrfGuard,
+        *,
+        headless: bool = False,
+        driver: Driver | None = None,
+        hub: RedisRemoteBrowserHub | None = None,
+        slots: IBrowserSlots | None = None,
     ) -> None:
         self._guard = guard
         self._headless = headless
         self._driver = driver
+        self._hub = hub
+        self._slots = slots
 
     async def record(
         self,
@@ -169,8 +181,25 @@ class PlaywrightTeachRecorder:
         on_step: StepSink,
         timeout_s: float,
         stop: asyncio.Event,
+        hitl: HitlSession | None = None,
     ) -> TeachResult:
+        """`hitl`: headless, streamed into the console (servers) instead of a local window."""
         await self._guard.validate(url)
+        if hitl is not None and self._hub is None:
+            raise RuntimeError("remote browser sessions are not configured")
+        slot = self._slots.slot("hitl") if self._slots is not None else contextlib.nullcontext()
+        async with slot:
+            return await self._record(url, storage_state, on_step, timeout_s, stop, hitl)
+
+    async def _record(
+        self,
+        url: str,
+        storage_state: str | None,
+        on_step: StepSink,
+        timeout_s: float,
+        stop: asyncio.Event,
+        hitl: HitlSession | None,
+    ) -> TeachResult:
         from playwright.async_api import async_playwright
 
         steps: list[TeachStep] = []
@@ -181,6 +210,7 @@ class PlaywrightTeachRecorder:
         port = await proxy.start()
         pw = await async_playwright().start()
         browser: Any = None
+        view: RemoteView | None = None
 
         async def add(step: TeachStep | None) -> None:
             if step is None:
@@ -209,14 +239,14 @@ class PlaywrightTeachRecorder:
 
         try:
             browser = await pw.chromium.launch(
-                headless=self._headless,
+                headless=self._headless or hitl is not None,
                 proxy={"server": f"http://127.0.0.1:{port}", "bypass": "<-loopback>"},
                 args=["--proxy-bypass-list=<-loopback>"],
             )
             context = await browser.new_context(
                 user_agent=USER_AGENT,
                 locale="en-US",
-                viewport={"width": 1280, "height": 900},
+                viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
                 storage_state=json.loads(storage_state) if storage_state else None,
             )
             await context.expose_binding("__ootgRecordEvent", binding)
@@ -224,6 +254,9 @@ class PlaywrightTeachRecorder:
             context.on("page", lambda p: watch(p, new_tab=True))
             page = await context.new_page()
             watch(page, new_tab=False)
+            if hitl is not None and self._hub is not None:
+                view = RemoteView(self._hub, hitl, on_finish=stop.set)
+                await view.attach(context, page)
             with contextlib.suppress(Exception):
                 await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             if self._driver is not None:
@@ -273,6 +306,8 @@ class PlaywrightTeachRecorder:
                 visited_urls=visited,
             )
         finally:
+            if view is not None:
+                await view.detach()
             with contextlib.suppress(Exception):
                 if browser is not None:
                     await browser.close()

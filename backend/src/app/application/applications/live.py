@@ -35,9 +35,9 @@ def live_observer(
     async def observe(step: LiveStep, frame: bytes | None) -> None:
         seq = 0
         if frame:
-            seq = frames.put(user_id, application_id, frame)
+            seq = await frames.put(user_id, application_id, frame)
         else:
-            stored = frames.get(user_id, application_id)
+            stored = await frames.get(user_id, application_id)
             seq = stored[0] if stored else 0
         now = time.monotonic()
         if not (step.final or frame or now - last[0] >= EVENT_INTERVAL_S):
@@ -74,8 +74,8 @@ class GetLiveFrame:
     def __init__(self, frames: ILiveFrameStore | None) -> None:
         self._frames = frames
 
-    def execute(self, user_id: uuid.UUID, application_id: uuid.UUID) -> tuple[int, bytes]:
-        found = self._frames.get(user_id, application_id) if self._frames else None
+    async def execute(self, user_id: uuid.UUID, application_id: uuid.UUID) -> tuple[int, bytes]:
+        found = await self._frames.get(user_id, application_id) if self._frames else None
         if found is None:
             raise NotFoundError("no live frame for this application yet")
         return found

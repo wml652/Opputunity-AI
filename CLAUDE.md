@@ -141,7 +141,7 @@ Layers, top to bottom. A layer may import only layers below it.
   PII fields themselves are only ever filled by the deterministic profile mapper.
 - Portal sign-in: the filler never fills, asks for, or stores passwords. A visible
   `input[type=password]` blocks the run (`BLOCKED_NEEDS_HUMAN`); "Sign In in Browser & Resume"
-  (`UnblockApplication`, `POST /applications/{id}/unblock`) opens the headful capture
+  (`UnblockApplication`, `POST /applications/{id}/unblock`) opens the capture (a local window, or a remote stream on servers)
   (`SessionKind.PORTAL`) and resumes only after the encrypted cookies are stored. Fill and submit
   runs load unexpired PORTAL/CHALLENGE sessions for the portal domain
   (`application.applications.portal_sessions`); the newer of checkpoint vs session wins per cookie.
@@ -205,6 +205,30 @@ Layers, top to bottom. A layer may import only layers below it.
 - Honest completion: `campaign_outcome` (pure, computed on read from `extract_done` /
   `extract_failed` / `opportunities_found`) reports `ok | degraded | failed` on every finished
   campaign's progress; a COMPLETED campaign that extracted nothing shows as failed in the UI.
+- Durable execution (`EXECUTION_MODE=inprocess|arq`; `CAMPAIGN_RUNNER` is an alias): with arq,
+  campaigns run on the `discovery` queue, fills / submissions on `browser`, and the `system`
+  worker runs `resume_work` every minute. Every running campaign and fill holds a run lease
+  (`application.services.leases`: owner = host:pid:role/run, TTL 120 s, renewed every 30 s;
+  claimed atomically, never stolen while live). `ResumeInterruptedWork` restarts expired-lease
+  runs (in-process mode: at API startup) from their checkpoint - fetched pages are never fetched
+  or extracted again, DISTILLED pages are re-queued, a staging campaign only finishes staging, a
+  fill restarts from its saved state and still stops at the OK gate - at most `MAX_RESUMES` (3)
+  times, then the campaign fails / the fill goes to the user. SUBMITTING is NEVER resumed
+  (SUBMISSION_FAILED, "check the portal"). Resumed runs wait under `PENDING_OWNER`.
+- Browser pool: `RedisBrowserSlots` caps Chromium instances across ALL processes - pool "auto"
+  (`MAX_BROWSERS`, 3: fills, submissions, crawler browsers) and "hitl" (`MAX_HITL_BROWSERS`, 2:
+  remote human sessions). Slots expire with their holder (crashed process frees them).
+  `ILiveFrameStore` is async; arq mode uses `RedisLiveFrameStore` (TTL 600 s).
+- Remote human-in-the-loop (`HITL_MODE=auto|local|remote`; auto = remote in production): Teach
+  Mode, portal sign-in and challenges run a HEADLESS Chromium in the API process, streamed to the
+  console (`RemoteView`: CDP screencast JPEG -> `RedisRemoteBrowserHub` -> `WS
+  /api/v1/hitl/sessions/{id}/stream`). The WebSocket requires the access cookie, an allowed
+  Origin (`CORS_ORIGINS`) and the caller's own session (4401 / 4403 / 4404). Input events are
+  validated (`api.v1.hitl.parse_input`: mouse / key / text / back-forward-reload / finish /
+  close - no URLs, no scripts), rate-limited, relayed over Redis pub/sub and NEVER logged or
+  stored (the user may type a portal password); the recorder still drops password values.
+  "Done" (`POST /hitl/sessions/{id}/close`) closes the remote browser like closing a window.
+  The agent never acts in a human session; only the person at the console does.
 - Process health: `GET /api/v1/health` = liveness, `GET /api/v1/ready` = database + Redis probes
   (503 when down) + free memory. Each fill waits up to 2 min for `MIN_FREE_MEMORY_MB` (1200)
   before launching its browser. `scripts/launcher.py --supervise` (started by every launch,

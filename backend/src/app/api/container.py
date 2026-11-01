@@ -106,6 +106,7 @@ from app.application.training.service import (
 )
 from app.domain.ports.discovery import ICampaignRunner
 from app.domain.ports.events import IEventBus
+from app.domain.ports.hitl import IRemoteBrowserHub
 from app.domain.ports.security import IAccessTokenService
 
 
@@ -238,6 +239,8 @@ class ApiContainer:
     replay_events: ReplayEvents
     worker_status: GetWorkerStatus
     readiness: CheckReadiness
+    # Remote browser sessions (servers); None = human steps use a local window.
+    hitl: IRemoteBrowserHub | None
     vault: VaultUseCases
     discovery: DiscoveryUseCases
     applications: ApplicationUseCases

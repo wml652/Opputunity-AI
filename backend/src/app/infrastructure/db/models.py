@@ -357,6 +357,10 @@ class CampaignRow(Base):
     created_at: Mapped[datetime] = _ts(default_now=True)
     started_at: Mapped[datetime | None] = _ts(nullable=True)
     finished_at: Mapped[datetime | None] = _ts(nullable=True)
+    # Durable execution: the worker running the campaign renews this lease (see 0011).
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = _ts(nullable=True)
+    resume_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class CampaignSourceRow(Base):
@@ -480,6 +484,7 @@ class ApplicationRow(Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     lock_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
     lease_expires_at: Mapped[datetime | None] = _ts(nullable=True)
+    resume_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_at: Mapped[datetime | None] = _ts(nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")

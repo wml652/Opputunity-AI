@@ -14,6 +14,7 @@ from app.api.v1 import (
     auth,
     discovery,
     events,
+    hitl,
     llm,
     sessions,
     system,
@@ -37,7 +38,18 @@ def build_api(container: ApiContainer, lifespan: Lifespan | None = None) -> Fast
     app.state.container = container
 
     v1 = APIRouter(prefix="/api/v1")
-    for module in (auth, llm, events, system, vault, discovery, applications, sessions, training):
+    for module in (
+        auth,
+        llm,
+        events,
+        system,
+        vault,
+        discovery,
+        applications,
+        sessions,
+        training,
+        hitl,
+    ):
         v1.include_router(module.router)
     app.include_router(v1)
 

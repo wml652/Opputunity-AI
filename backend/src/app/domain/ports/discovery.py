@@ -22,6 +22,7 @@ from app.domain.discovery.models import (
 from app.domain.discovery.playbook import DomainPlaybook, ExtractionStrategy, FetchStrategy
 from app.domain.discovery.sessions import BrowserSession, SearchCredential
 from app.domain.eligibility.rules import RuleResult
+from app.domain.ports.hitl import HitlSession
 from app.domain.ports.llm import ILLMProvider
 from app.domain.shared.enums import (
     ApplicationState,
@@ -205,9 +206,17 @@ class ISearchCredentialRepository(Protocol):
 
 
 class IHeadfulSessionCapturer(Protocol):
-    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
-        """Open a VISIBLE browser at `url` for the user to pass a challenge / log in; return the
-        resulting storage_state JSON once the page is usable (or raise on timeout/close)."""
+    async def capture(
+        self,
+        url: str,
+        *,
+        timeout_s: float,
+        wait_for_close: bool = False,
+        hitl: HitlSession | None = None,
+    ) -> str:
+        """Open a VISIBLE browser at `url` (or, with `hitl`, a remote one streamed into the
+        console) for the user to pass a challenge / log in; return the resulting storage_state
+        JSON once the page is usable (or raise on timeout/close)."""
         ...
 
 
@@ -248,12 +257,33 @@ class ICampaignRepository(Protocol):
         self, user_id: uuid.UUID, campaign_id: uuid.UUID
     ) -> CampaignStatus | None: ...
 
-    async def fail_running(self, error: str, at: datetime) -> int:
-        """System scope: mark every RUNNING/DRAFT campaign as FAILED (interrupted)."""
-        ...
-
     async def active_for_user(self, user_id: uuid.UUID) -> Campaign | None:
         """The user's DRAFT/RUNNING campaign, if any (one active campaign per user)."""
+        ...
+
+    async def claim_lease(
+        self,
+        user_id: uuid.UUID,
+        campaign_id: uuid.UUID,
+        owner: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        """Take (or renew) the run lease unless another live owner holds it."""
+        ...
+
+    async def release_lease(
+        self, user_id: uuid.UUID, campaign_id: uuid.UUID, owner: str
+    ) -> None: ...
+
+    async def stale_running(self, now: datetime, limit: int = 100) -> Sequence[Campaign]:
+        """System scope: RUNNING campaigns whose lease expired (their worker died)."""
+        ...
+
+    async def mark_resumed(
+        self, user_id: uuid.UUID, campaign_id: uuid.UUID, pending_until: datetime
+    ) -> None:
+        """Count one automatic resume; the run waits under the pending owner until claimed."""
         ...
 
 

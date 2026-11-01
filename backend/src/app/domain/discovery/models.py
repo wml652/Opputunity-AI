@@ -164,6 +164,7 @@ class Campaign:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     sources: list[CampaignSource] = field(default_factory=list)
+    resume_count: int = 0  # automatic resumes after a worker restart (capped)
 
     @property
     def is_active(self) -> bool:

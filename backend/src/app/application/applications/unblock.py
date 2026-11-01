@@ -59,5 +59,7 @@ class UnblockApplication:
             and not is_aggregator_url(checkpoint.checkpoint.url)
         ):
             url = checkpoint.checkpoint.url
-        domain = await self.capture.execute(user_id, url, SessionKind.PORTAL, on_captured=resume)
+        domain = await self.capture.execute(
+            user_id, url, SessionKind.PORTAL, on_captured=resume, application_id=application_id
+        )
         return UnblockStarted(application_id, domain, url)

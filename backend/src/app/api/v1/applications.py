@@ -459,7 +459,7 @@ async def live_frame(
     application_id: uuid.UUID, user_id: CurrentUserId, container: Container
 ) -> Response:
     """Latest live-viewport JPEG of a running fill / submit (owner only; `?t=` busts caches)."""
-    seq, frame = container.applications.live_frame.execute(user_id, application_id)
+    seq, frame = await container.applications.live_frame.execute(user_id, application_id)
     return Response(
         content=frame,
         media_type="image/jpeg",
@@ -470,6 +470,7 @@ async def live_frame(
 class TeachOut(BaseModel):
     application_id: uuid.UUID
     url: str
+    session_id: uuid.UUID | None = None  # remote browser session to open in the console
 
 
 @router.post(
@@ -483,7 +484,9 @@ async def teach(
     """Teach Mode: a visible browser opens at the portal; the agent records what you do and
     keeps the route, your answers (as memory) and the session when you finish."""
     started = await container.applications.teach.execute(user_id, application_id)
-    return TeachOut(application_id=started.application_id, url=started.url)
+    return TeachOut(
+        application_id=started.application_id, url=started.url, session_id=started.session_id
+    )
 
 
 @router.post("/applications/{application_id}/teach/finish", status_code=status.HTTP_204_NO_CONTENT)
@@ -492,7 +495,7 @@ async def teach_finish(
 ) -> Response:
     """'Finish training & save to brain' from the console."""
     await container.applications.detail.execute(user_id, application_id)  # ownership check
-    if not container.applications.teach.finish(application_id):
+    if not await container.applications.teach.finish(user_id, application_id):
         raise NotFoundError("no Teach Mode window is open for this application")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

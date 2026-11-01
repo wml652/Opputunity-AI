@@ -43,7 +43,9 @@ class LoginCapturer:
     def __init__(self) -> None:
         self.urls: list[str] = []
 
-    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
+    async def capture(
+        self, url: str, *, timeout_s: float, wait_for_close: bool = False, hitl: object = None
+    ) -> str:
         self.urls.append(url)
         return json.dumps({"cookies": [], "origins": []})
 

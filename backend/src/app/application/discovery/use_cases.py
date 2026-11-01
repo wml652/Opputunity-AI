@@ -98,6 +98,8 @@ class DiscoveryDeps:
     # Streaming auto-apply: start filling one application the moment it is queued (the
     # application runner bounds concurrency); None = only the end-of-campaign staging pass.
     start_application: Callable[[uuid.UUID, uuid.UUID], Awaitable[None]] | None = None
+    # Identity of this process in run leases (host:pid[:queue]); set by the composition root.
+    runner_id: str = "in-process"
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,9 +437,14 @@ class RunCampaign:
     async def execute(self, user_id: uuid.UUID, campaign_id: uuid.UUID) -> None:
         async with self.deps.uow_factory(user_id) as uow:
             campaign = await uow.campaigns.get(user_id, campaign_id)
-        if campaign is None or campaign.status is not CampaignStatus.DRAFT:
+        if campaign is None or campaign.status not in (
+            CampaignStatus.DRAFT,
+            CampaignStatus.RUNNING,
+        ):
             return
-        await CampaignRun(self.deps, campaign).execute()
+        # RUNNING here = a resume after a worker restart (the sweep re-enqueued it).
+        resume = campaign.status is CampaignStatus.RUNNING
+        await CampaignRun(self.deps, campaign).execute(resume=resume)
 
 
 @dataclass(slots=True)
@@ -454,21 +461,3 @@ class RetryPage:
         if campaign is None or page is None or page.campaign_id != campaign_id:
             raise NotFoundError("page not found")
         await CampaignRun(self.deps, campaign).retry_page(page)
-
-
-@dataclass(slots=True)
-class SweepInterruptedCampaigns:
-    """At startup (in-process runner): campaigns still RUNNING were interrupted by a restart."""
-
-    system_uow_factory: IUnitOfWorkFactory
-    clock: Clock
-
-    async def execute(self) -> int:
-        async with self.system_uow_factory() as uow:
-            count = await uow.campaigns.fail_running(
-                "interrupted: the app restarted while this campaign was running. Open the "
-                "campaign and use Retry on any page, or launch it again.",
-                self.clock.now(),
-            )
-            await uow.commit()
-        return count

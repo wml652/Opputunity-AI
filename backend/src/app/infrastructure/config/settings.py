@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     maintenance_interval_seconds: float = 300.0
     # Browser filling runs in parallel (batch auto-stage); each is a Chromium instance.
     max_parallel_fills: int = 2
+    # Global browser pool (Redis, across every worker process): automated browsers (fills,
+    # submissions, crawlers) and remote human sessions (Teach Mode, sign-in, challenges).
+    max_browsers: int = 3
+    max_hitl_browsers: int = 2
+    # Human-in-the-loop browsers: "local" = a visible window on this machine (dev), "remote" =
+    # headless Chromium streamed into the console (servers), "auto" = remote in production.
+    hitl_mode: Literal["auto", "local", "remote"] = "auto"
     # Memory admission: a fill waits (up to 2 min) for this much free RAM before its browser.
     min_free_memory_mb: int = 1200
     # Extra aggregator / directory hosts (beyond the built-in list): never typed into by the
@@ -59,7 +66,12 @@ class Settings(BaseSettings):
     llm_allow_insecure_http: bool = False
 
     # Discovery / scraping
-    campaign_runner: Literal["inprocess", "arq"] = "inprocess"
+    # "inprocess": campaigns and fills run inside the API (dev, memory:// Redis). "arq": the
+    # API enqueues jobs; `uv run worker --queue discovery|browser|system` executes them.
+    execution_mode: Literal["inprocess", "arq"] = Field(
+        "inprocess",
+        validation_alias=AliasChoices("execution_mode", "campaign_runner"),
+    )
     tavily_api_key: SecretStr | None = None
     brave_api_key: SecretStr | None = None
     crawl_use_playwright: bool = True  # falls back to plain HTTP if Chromium is not installed

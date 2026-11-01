@@ -9,8 +9,11 @@ import socket
 import uuid
 from typing import Any, TypedDict
 
+from app.application.applications.submission import RunSubmission
+from app.application.applications.use_cases import RunApplication
 from app.application.discovery.use_cases import RunCampaign
 from app.application.events.use_cases import RelayOutbox
+from app.application.system.resume import ResumeInterruptedWork
 from app.domain.ports.events import IWorkerRegistry
 from app.infrastructure.logging import get_logger
 
@@ -60,13 +63,54 @@ async def run_campaign(ctx: dict[str, Any], user_id: str, campaign_id: str) -> N
     await run.execute(uuid.UUID(user_id), uuid.UUID(campaign_id))
 
 
+async def run_application(ctx: dict[str, Any], user_id: str, application_id: str) -> None:
+    """Browser queue: one fill run (bounded by the global browser pool)."""
+    run: RunApplication = ctx["run_application"]
+    await _with_browser(ctx, run.execute, user_id, application_id)
+
+
+async def run_submission(ctx: dict[str, Any], user_id: str, application_id: str) -> None:
+    """Browser queue: one approved submission (the human OK was checked when it was enqueued
+    and is checked again inside RunSubmission)."""
+    submit: RunSubmission = ctx["run_submission"]
+    await _with_browser(ctx, submit.execute, user_id, application_id)
+
+
+async def _with_browser(ctx: dict[str, Any], job: Any, user_id: str, application_id: str) -> None:
+    from app.infrastructure.runners.application_runner import run_with_browser
+
+    await run_with_browser(
+        job,
+        uuid.UUID(user_id),
+        uuid.UUID(application_id),
+        slots=ctx.get("browser_slots"),
+        resources=ctx.get("resources"),
+        min_free_mb=int(ctx.get("min_free_memory_mb", 0)),
+    )
+
+
+async def resume_work(ctx: dict[str, Any]) -> dict[str, int]:
+    """System queue cron: restart campaigns / fills whose worker died (expired run lease)."""
+    resume: ResumeInterruptedWork = ctx["resume"]
+    report = await resume.execute()
+    counts = {
+        "campaigns_resumed": report.campaigns_resumed,
+        "campaigns_failed": report.campaigns_failed,
+        "fills_resumed": report.fills_resumed,
+        "reaped": report.reaped,
+    }
+    if any(counts.values()):
+        log.warning("runs.resumed", **counts)
+    return counts
+
+
 async def ping(ctx: dict[str, Any], message: str = "pong") -> str:
     log.info("worker.ping", worker_id=ctx.get("worker_id"), message=message)
     return message
 
 
 async def maintenance(ctx: dict[str, Any]) -> dict[str, int]:
-    """Cron (system queue): hand interrupted runs back to the user and expire past deadlines."""
-    reaper: Any = ctx["reap_leases"]
+    """Cron (system queue): expire past deadlines. (Interrupted runs: see `resume_work`, which
+    also hands over-cap runs back to the user and fails interrupted submissions.)"""
     deadlines: Any = ctx["sweep_deadlines"]
-    return {"reaped": await reaper.execute(), "expired": await deadlines.execute()}
+    return {"expired": await deadlines.execute()}

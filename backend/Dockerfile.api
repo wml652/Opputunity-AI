@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# API image (FastAPI + in-process outbox relay). Discovery/filling run in the worker image.
+# API image (FastAPI + in-process outbox relay). Discovery/filling run in the worker image; the
+# API keeps a headless Chromium only for remote human-in-the-loop sessions (Teach Mode, portal
+# sign-in, challenges) streamed into the console over a WebSocket. amd64 and arm64 (Oracle A1).
 # Build from the repo root:  docker build -f backend/Dockerfile.api -t ootg-api backend
 FROM python:3.12-slim-bookworm AS build
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
@@ -13,13 +15,19 @@ COPY alembic.ini ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 FROM python:3.12-slim-bookworm
-RUN groupadd --system app && useradd --system --gid app --home /app app
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+COPY --from=build /app/.venv /app/.venv
+RUN /app/.venv/bin/playwright install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/*
+RUN groupadd --system app && useradd --system --gid app --home /app app \
+    && chown -R app:app /ms-playwright
 WORKDIR /app
 COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     ENVIRONMENT=production \
-    CAMPAIGN_RUNNER=arq \
+    EXECUTION_MODE=arq \
+    HITL_MODE=remote \
     ALLOW_HEADFUL_CAPTURE=false \
     LOG_JSON=true
 USER app

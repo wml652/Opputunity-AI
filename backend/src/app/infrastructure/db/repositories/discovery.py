@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.leases import PENDING_OWNER
 from app.domain.applications.models import Application, Transition
 from app.domain.discovery.models import (
     AiPolicy,
@@ -117,6 +118,7 @@ class SqlCampaignRepository:
             started_at=row.started_at,
             finished_at=row.finished_at,
             sources=sources,
+            resume_count=row.resume_count,
         )
 
     async def get(self, user_id: uuid.UUID, campaign_id: uuid.UUID) -> Campaign | None:
@@ -174,18 +176,71 @@ class SqlCampaignRepository:
             stmt = stmt.where(CampaignRow.status != CampaignStatus.CANCELLED)
         await self._s.execute(stmt.values(**values))
 
-    async def fail_running(self, error: str, at: datetime) -> int:
+    async def claim_lease(
+        self,
+        user_id: uuid.UUID,
+        campaign_id: uuid.UUID,
+        owner: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
         result = await self._s.execute(
             update(CampaignRow)
-            .where(CampaignRow.status.in_([CampaignStatus.RUNNING, CampaignStatus.DRAFT]))
+            .where(
+                CampaignRow.user_id == user_id,
+                CampaignRow.id == campaign_id,
+                or_(
+                    CampaignRow.lease_owner.is_(None),
+                    CampaignRow.lease_owner == owner,
+                    CampaignRow.lease_owner == PENDING_OWNER,
+                    CampaignRow.lease_expires_at.is_(None),
+                    CampaignRow.lease_expires_at < now,
+                ),
+            )
+            .values(lease_owner=owner, lease_expires_at=expires_at)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def release_lease(self, user_id: uuid.UUID, campaign_id: uuid.UUID, owner: str) -> None:
+        await self._s.execute(
+            update(CampaignRow)
+            .where(
+                CampaignRow.user_id == user_id,
+                CampaignRow.id == campaign_id,
+                CampaignRow.lease_owner == owner,
+            )
+            .values(lease_owner=None, lease_expires_at=None)
+        )
+
+    async def stale_running(self, now: datetime, limit: int = 100) -> Sequence[Campaign]:
+        rows = (
+            await self._s.scalars(
+                select(CampaignRow)
+                .where(
+                    CampaignRow.status == CampaignStatus.RUNNING,
+                    or_(
+                        CampaignRow.lease_expires_at.is_(None),
+                        CampaignRow.lease_expires_at < now,
+                    ),
+                )
+                .order_by(CampaignRow.created_at)
+                .limit(limit)
+            )
+        ).all()
+        return [self._campaign(r, []) for r in rows]
+
+    async def mark_resumed(
+        self, user_id: uuid.UUID, campaign_id: uuid.UUID, pending_until: datetime
+    ) -> None:
+        await self._s.execute(
+            update(CampaignRow)
+            .where(CampaignRow.user_id == user_id, CampaignRow.id == campaign_id)
             .values(
-                status=CampaignStatus.FAILED,
-                phase=CampaignPhase.FAILED.value,
-                error=error,
-                finished_at=at,
+                resume_count=CampaignRow.resume_count + 1,
+                lease_owner=PENDING_OWNER,
+                lease_expires_at=pending_until,
             )
         )
-        return int(result.rowcount)  # type: ignore[attr-defined]
 
     async def active_for_user(self, user_id: uuid.UUID) -> Campaign | None:
         row = await self._s.scalar(
@@ -592,6 +647,7 @@ def _app(r: ApplicationRow) -> Application:
         updated_at=r.updated_at,
         version=r.version,
         last_error=r.last_error,
+        resume_count=r.resume_count,
     )
 
 

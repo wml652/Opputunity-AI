@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import socket
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -79,7 +81,6 @@ from app.application.discovery.use_cases import (
     ListOpportunities,
     RetryPage,
     RunCampaign,
-    SweepInterruptedCampaigns,
 )
 from app.application.essay.synthesis import (
     EditEssayDraft,
@@ -140,6 +141,7 @@ from app.application.profile.use_cases import (
     UploadDocument,
 )
 from app.application.services.evidence import EvidenceDeps, ProfileEvidenceRetriever
+from app.application.system.resume import ResumeInterruptedWork
 from app.application.system.use_cases import CheckReadiness, GetWorkerStatus
 from app.application.training.service import (
     BackfillTrajectories,
@@ -150,7 +152,7 @@ from app.application.training.service import (
 )
 from app.application.vault_deps import VaultDeps
 from app.domain.ports.agent import ITeachRecorder
-from app.domain.ports.applications import IApplicationRunner, INotifier
+from app.domain.ports.applications import IApplicationRunner, ILiveFrameStore, INotifier
 from app.domain.ports.discovery import ICampaignRunner, IHeadfulSessionCapturer, ISearchProvider
 from app.domain.ports.llm import (
     IRerankProvider,
@@ -158,10 +160,12 @@ from app.domain.ports.llm import (
     IVisionProvider,
     IVisionProviderFactory,
 )
+from app.domain.ports.system import IBrowserSlots
 from app.domain.shared.clock import Clock, SystemClock
 from app.domain.shared.enums import NotifChannel
 from app.infrastructure.browser.form_filler import PlaywrightFormFiller
-from app.infrastructure.browser.live_frames import InMemoryLiveFrameStore
+from app.infrastructure.browser.live_frames import InMemoryLiveFrameStore, RedisLiveFrameStore
+from app.infrastructure.browser.remote_hub import RedisRemoteBrowserHub
 from app.infrastructure.browser.session_capture import PlaywrightSessionCapturer
 from app.infrastructure.browser.teach_recorder import PlaywrightTeachRecorder
 from app.infrastructure.config.settings import Settings
@@ -188,8 +192,12 @@ from app.infrastructure.notify.notifiers import (
     SmtpNotifier,
     TwilioWhatsAppNotifier,
 )
-from app.infrastructure.runners.application_runner import InProcessApplicationRunner
+from app.infrastructure.runners.application_runner import (
+    ArqApplicationRunner,
+    InProcessApplicationRunner,
+)
 from app.infrastructure.runners.campaign_runners import InProcessCampaignRunner
+from app.infrastructure.runtime.browser_slots import AUTO, HITL, RedisBrowserSlots
 from app.infrastructure.runtime.resources import DatabaseProbe, PsutilResources, RedisProbe
 from app.infrastructure.scraping.distiller import HtmlContentProcessor
 from app.infrastructure.scraping.document_parser import PdfLayoutParser
@@ -224,7 +232,10 @@ class Infrastructure:
     application_runner: IApplicationRunner | None = None
     session_capturer: IHeadfulSessionCapturer | None = None  # tests inject a fake
     search_provider: ISearchProvider | None = None  # tests inject a fake search
-    live_frames: InMemoryLiveFrameStore = field(default_factory=InMemoryLiveFrameStore)
+    live_frames: ILiveFrameStore = field(default_factory=InMemoryLiveFrameStore)
+    browser_slots: IBrowserSlots | None = None
+    runner_id: str = "in-process"
+    hitl_hub: RedisRemoteBrowserHub | None = None  # remote human-in-the-loop sessions
     teach_recorder: ITeachRecorder | None = None  # tests inject a scripted recorder
     teach_session: TeachAgentSession | None = None
     rerank_factory: IRerankProviderFactory | None = None  # tests inject a fake
@@ -301,7 +312,40 @@ def build_infrastructure(
             test_fixture_hosts=settings.scraper_test_fixture_hosts,
         ),
         clock=clock or SystemClock(),
+        live_frames=(
+            RedisLiveFrameStore(redis)
+            if settings.execution_mode == "arq"
+            else InMemoryLiveFrameStore()
+        ),
+        browser_slots=RedisBrowserSlots(
+            redis, {AUTO: settings.max_browsers, HITL: settings.max_hitl_browsers}
+        ),
+        runner_id=make_runner_id(),
+        hitl_hub=RedisRemoteBrowserHub(redis),
     )
+
+
+def hitl_remote(s: Settings) -> bool:
+    """Human steps (Teach Mode, sign-in, challenges) in a remote browser streamed into the
+    console instead of a window on this machine: always on servers."""
+    if s.hitl_mode != "auto":
+        return s.hitl_mode == "remote"
+    return s.is_production or not s.allow_headful_capture
+
+
+def _remote_hub(infra: Infrastructure) -> RedisRemoteBrowserHub | None:
+    return infra.hitl_hub if hitl_remote(infra.settings) else None
+
+
+def _browser_for_humans(s: Settings) -> bool:
+    """A local visible window (dev machine) or a remote streamed one (server)."""
+    local = s.environment != "production" and s.allow_headful_capture
+    return playwright_available() and (local or hitl_remote(s))
+
+
+def make_runner_id(role: str = "proc") -> str:
+    """This process in run leases: host:pid:role."""
+    return f"{socket.gethostname()}:{os.getpid()}:{role}"[:100]
 
 
 def llm_deps(infra: Infrastructure) -> LLMDeps:
@@ -400,6 +444,7 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
             use_playwright=s.crawl_use_playwright and playwright_available(),
             politeness_seconds=s.crawl_politeness_seconds,
             respect_robots=s.crawl_respect_robots,
+            slots=infra.browser_slots,
         ),
         processor=HtmlContentProcessor(frozenset(infra.settings.aggregator_domains)),
         search=default_search(infra),
@@ -424,6 +469,7 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
             default_tavily_key=s.tavily_api_key.get_secret_value() if s.tavily_api_key else None,
             default_brave_key=s.brave_api_key.get_secret_value() if s.brave_api_key else None,
         ),
+        runner_id=infra.runner_id,
     )
 
 
@@ -514,12 +560,12 @@ def build_training(infra: Infrastructure) -> TrainingUseCases:
 def build_teach(infra: Infrastructure, start: StartFilling) -> TeachAgentSession:
     """One Teach Mode coordinator per app (it tracks the open windows)."""
     if infra.teach_session is None:
-        s = infra.settings
-        headful = (
-            s.environment != "production" and s.allow_headful_capture and playwright_available()
-        )
         recorder = infra.teach_recorder or (
-            PlaywrightTeachRecorder(infra.crawl_guard) if headful else None
+            PlaywrightTeachRecorder(
+                infra.crawl_guard, hub=infra.hitl_hub, slots=infra.browser_slots
+            )
+            if _browser_for_humans(infra.settings)
+            else None
         )
         vault = build_vault(infra)
         infra.teach_session = TeachAgentSession(
@@ -533,6 +579,7 @@ def build_teach(infra: Infrastructure, start: StartFilling) -> TeachAgentSession
                 start=start,
                 spawn=infra.spawn,
                 training=build_trajectory_service(infra),
+                hub=_remote_hub(infra),
             )
         )
     return infra.teach_session
@@ -546,17 +593,21 @@ def _stream_starter(infra: Infrastructure) -> Callable[[uuid.UUID, uuid.UUID], A
 
 
 def build_sessions(infra: Infrastructure) -> SessionUseCases:
-    s = infra.settings
-    # A visible browser only makes sense on the user's own machine (local runtime).
-    headful = s.environment != "production" and s.allow_headful_capture and playwright_available()
     deps = SessionDeps(
         uow_factory=infra.uow_factory,
         cipher=infra.cipher,
         clock=infra.clock,
         url_guard=infra.crawl_guard,
         capturer=infra.session_capturer
-        or (PlaywrightSessionCapturer(infra.crawl_guard) if headful else None),
+        or (
+            PlaywrightSessionCapturer(
+                infra.crawl_guard, hub=infra.hitl_hub, slots=infra.browser_slots
+            )
+            if _browser_for_humans(infra.settings)
+            else None
+        ),
         spawn=infra.spawn,
+        hub=_remote_hub(infra),
     )
     return SessionUseCases(
         list_sessions=ListBrowserSessions(deps),
@@ -570,10 +621,10 @@ def build_sessions(infra: Infrastructure) -> SessionUseCases:
 
 
 def build_campaign_runner(infra: Infrastructure) -> ICampaignRunner:
-    """In-process by default (dev, memory:// Redis). With CAMPAIGN_RUNNER=arq the API enqueues
+    """In-process by default (dev, memory:// Redis). With EXECUTION_MODE=arq the API enqueues
     jobs and `uv run worker --queue discovery` executes them."""
     if infra.campaign_runner is None:
-        if infra.settings.campaign_runner == "arq":
+        if infra.settings.execution_mode == "arq":
             from arq.connections import ArqRedis
 
             from app.infrastructure.runners.campaign_runners import ArqCampaignRunner
@@ -696,6 +747,7 @@ def build_application_deps(infra: Infrastructure) -> ApplicationDeps:
         ),
         aggregators=frozenset(infra.settings.aggregator_domains),
         live_frames=infra.live_frames,
+        runner_id=infra.runner_id,
         chat=ResolveChatProvider(llm_deps(infra)),
         training=build_trajectory_service(infra),
     )
@@ -724,15 +776,24 @@ def build_evidence_retriever(infra: Infrastructure) -> ProfileEvidenceRetriever:
 
 
 def build_application_runner(infra: Infrastructure) -> IApplicationRunner:
+    """In-process (dev) or the arq `browser` queue (EXECUTION_MODE=arq)."""
     if infra.application_runner is None:
-        deps = build_application_deps(infra)
-        infra.application_runner = InProcessApplicationRunner(
-            RunApplication(deps),
-            RunSubmission(deps),
-            max_parallel=infra.settings.max_parallel_fills,
-            resources=PsutilResources(),
-            min_free_memory_mb=infra.settings.min_free_memory_mb,
-        )
+        if infra.settings.execution_mode == "arq":
+            from arq.connections import ArqRedis
+
+            infra.application_runner = ArqApplicationRunner(
+                ArqRedis(connection_pool=infra.redis.connection_pool)
+            )
+        else:
+            deps = build_application_deps(infra)
+            infra.application_runner = InProcessApplicationRunner(
+                RunApplication(deps),
+                RunSubmission(deps),
+                max_parallel=infra.settings.max_parallel_fills,
+                resources=PsutilResources(),
+                min_free_memory_mb=infra.settings.min_free_memory_mb,
+                slots=infra.browser_slots,
+            )
     return infra.application_runner
 
 
@@ -740,6 +801,17 @@ def build_maintenance(infra: Infrastructure) -> tuple[ReapLeases, SweepDeadlines
     return (
         ReapLeases(infra.system_uow_factory, infra.clock),
         SweepDeadlines(infra.system_uow_factory, infra.clock),
+    )
+
+
+def build_resume(infra: Infrastructure) -> ResumeInterruptedWork:
+    """Durable execution: restart campaigns / fills whose worker died (expired run lease)."""
+    return ResumeInterruptedWork(
+        infra.system_uow_factory,
+        infra.clock,
+        start_campaign=build_campaign_runner(infra).start,
+        start_application=build_application_runner(infra).start,
+        reaper=ReapLeases(infra.system_uow_factory, infra.clock),
     )
 
 
@@ -785,10 +857,6 @@ def build_notifications(infra: Infrastructure) -> NotificationUseCases:
         public_api_url=s.public_api_url,
         providers={c.value: n.name for c, n in deps.notifiers.items()},
     )
-
-
-def build_sweep(infra: Infrastructure) -> SweepInterruptedCampaigns:
-    return SweepInterruptedCampaigns(infra.system_uow_factory, infra.clock)
 
 
 def build_api_container(infra: Infrastructure) -> ApiContainer:
@@ -840,6 +908,7 @@ def build_api_container(infra: Infrastructure) -> ApiContainer:
         connection_status=GetConnectionStatus(infra.uow_factory),
         replay_events=ReplayEvents(infra.uow_factory),
         worker_status=GetWorkerStatus(infra.worker_registry),
+        hitl=_remote_hub(infra),
         readiness=CheckReadiness(
             [DatabaseProbe(infra.engine), RedisProbe(infra.redis)], PsutilResources()
         ),

@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlsplit
 
+from app.application.services.leases import LEASE_TTL, kept_lease, run_owner
 from app.domain.applications.models import Application, advance
 from app.domain.discovery.listing import (
     DedupeCandidate,
@@ -198,6 +199,8 @@ class CampaignRun:
         self.run_task: asyncio.Task[Any] | None = None
         self.provider_fails = 0  # consecutive key / model rejections (the circuit breaker)
         self.provider_error: str | None = None
+        self.owner = run_owner(deps.runner_id)
+        self.resumed_urls: set[str] = set()  # fetched before a worker restart (checkpoint)
         self.extract_llm: ILLMProvider | None = None
         self.primary_llm: ILLMProvider | None = None
         self.embedder: IEmbeddingProvider | None = None
@@ -406,7 +409,52 @@ class CampaignRun:
 
     # -- run -------------------------------------------------------------------------------------
 
-    async def execute(self) -> None:
+    async def execute(self, *, resume: bool = False) -> None:
+        """`resume`: the campaign was RUNNING when its worker died - continue from the
+        checkpoint instead of starting over."""
+        if not await self._claim_lease():
+            self.log("lease_held", detail="another worker is running this campaign")
+            return
+        try:
+            async with kept_lease(self._claim_lease):
+                await self._execute(resume)
+        finally:
+            with contextlib.suppress(Exception):
+                async with self.deps.uow_factory(self.user) as uow:
+                    await uow.campaigns.release_lease(self.user, self.c.id, self.owner)
+                    await uow.commit()
+
+    async def _claim_lease(self) -> bool:
+        now = self.deps.clock.now()
+        async with self.deps.uow_factory(self.user) as uow:
+            ok = await uow.campaigns.claim_lease(
+                self.user, self.c.id, self.owner, now, now + LEASE_TTL
+            )
+            await uow.commit()
+        return ok
+
+    async def _load_checkpoint(self) -> list[CrawledPage]:
+        """Pages fetched before the restart are never fetched or extracted again; pages that
+        were distilled but not yet extracted go back on the extraction queue."""
+        async with self.deps.uow_factory(self.user) as uow:
+            pages = await uow.pages.for_campaign(self.user, self.c.id, None)
+        for page in pages:
+            self.seen_urls.add(normalize_url(page.url))
+            if page.final_url:
+                self.seen_urls.add(normalize_url(page.final_url))
+        self.resumed_urls = set(self.seen_urls)
+        self.search_pages = sum(1 for p in pages if p.discovery_source == "web_search")
+        pending = [p for p in pages if p.status is CrawlStatus.DISTILLED]
+        # The pages in flight at the crash were counted as queued but never finished.
+        self.counters[EXTRACT_QUEUED] = self.counters[EXTRACT_DONE]
+        self.log("resumed", pages_done=len(pages) - len(pending), pages_requeued=len(pending))
+        await self._event(
+            "campaign.resumed",
+            {"pages_done": len(pages) - len(pending), "pages_requeued": len(pending)},
+        )
+        return pending
+
+    async def _execute(self, resume: bool) -> None:
         self.log(
             "start",
             name=self.c.name,
@@ -414,12 +462,14 @@ class CampaignRun:
             scope=self.c.scope.value,
             sources=[{"type": s.source_type.value, "url": s.url} for s in self.c.sources],
             log_file=self.deps.campaign_log.path_for(self.c.id),
+            resume=resume,
         )
-        await self._state(
-            status=CampaignStatus.RUNNING,
-            phase=CampaignPhase.CRAWLING,
-            started_at=self.deps.clock.now(),
-        )
+        if not resume:
+            await self._state(
+                status=CampaignStatus.RUNNING,
+                phase=CampaignPhase.CRAWLING,
+                started_at=self.deps.clock.now(),
+            )
         run_task = asyncio.current_task()
         assert run_task is not None
         self.run_task = run_task
@@ -427,14 +477,23 @@ class CampaignRun:
         workers: list[asyncio.Task[None]] = []
         try:
             await self.prepare()
-            self.counters[PAGES_BUDGET] = max(self.counters[PAGES_BUDGET], self._page_budget())
-            n = max(1, min(4, self.c.settings.extraction_workers))
-            workers = [asyncio.create_task(self._consume(i)) for i in range(n)]
-            await self._produce()
-            await self._state(phase=CampaignPhase.EXTRACTING)  # crawl done; draining the queue
-            for _ in workers:
-                await self.queue.put(None)
-            await asyncio.gather(*workers)
+            # A campaign that died while staging only has its staging pass left to do.
+            staging_only = resume and self.c.phase in (
+                CampaignPhase.FILLING,
+                CampaignPhase.AWAITING_OK,
+            )
+            if not staging_only:
+                pending = await self._load_checkpoint() if resume else []
+                self.counters[PAGES_BUDGET] = max(self.counters[PAGES_BUDGET], self._page_budget())
+                n = max(1, min(4, self.c.settings.extraction_workers))
+                workers = [asyncio.create_task(self._consume(i)) for i in range(n)]
+                for page in pending:
+                    await self._enqueue(page)
+                await self._produce()
+                await self._state(phase=CampaignPhase.EXTRACTING)  # crawl done; draining
+                for _ in workers:
+                    await self.queue.put(None)
+                await asyncio.gather(*workers)
             await self.save_playbooks()
             await self._auto_stage()
             await self._state(
@@ -1110,6 +1169,11 @@ class CampaignRun:
     ) -> None:
         """fetch result -> adaptive retries -> distill -> persist -> hub harvest / extraction
         queue. Errors here fail THIS page only."""
+        if self.resumed_urls and (
+            normalize_url(fetched.url) in self.resumed_urls
+            or normalize_url(fetched.final_url or fetched.url) in self.resumed_urls
+        ):
+            return  # handled before the restart (a site crawl re-walks its seed links)
         try:
             await self._handle_page(fetched, source_id, discovery_source, query)
         except (CampaignCancelledError, asyncio.CancelledError):

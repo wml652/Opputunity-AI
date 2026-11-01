@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 
+import { HitlDock } from "@/components/hitl/hitl-dock";
 import { Sidebar } from "@/components/telemetry/sidebar";
 import { TelemetryBar } from "@/components/telemetry/telemetry-bar";
 import { ApiError } from "@/lib/api";
@@ -30,6 +31,7 @@ export default function ConsoleLayout({ children }: { children: ReactNode }) {
     <EventStreamProvider>
       <div className="flex h-full flex-col">
         <TelemetryBar />
+        <HitlDock />
         <div className="flex min-h-0 flex-1">
           <Sidebar />
           <main className="min-w-0 flex-1 overflow-y-auto p-3">{children}</main>

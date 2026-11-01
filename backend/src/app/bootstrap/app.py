@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 
 from fastapi import FastAPI
 
@@ -14,7 +15,7 @@ from app.bootstrap.container import (
     build_infrastructure,
     build_maintenance,
     build_relay,
-    build_sweep,
+    build_resume,
 )
 from app.infrastructure.config.settings import Settings, get_settings
 from app.infrastructure.events.outbox_relay import OutboxRelayLoop
@@ -41,10 +42,12 @@ def create_app_with(
             )
             relay_loop.start()
         maintenance: asyncio.Task[None] | None = None
-        if settings.campaign_runner == "inprocess" and run_sweep:
-            interrupted = await build_sweep(infra).execute()
-            if interrupted:
-                log.warning("campaigns.interrupted_marked_failed", count=interrupted)
+        if settings.execution_mode == "inprocess" and run_sweep:
+            # Everything that was running belonged to the process that just stopped: resume
+            # it from its checkpoint (submissions are never retried; see ResumeInterruptedWork).
+            report = await build_resume(infra).execute(process_restarted=True)
+            if report.campaigns_resumed or report.fills_resumed or report.reaped:
+                log.warning("runs.resumed_after_restart", **asdict(report))
             maintenance = asyncio.create_task(_maintenance_loop(infra))
         log.info("api.started", environment=settings.environment, outbox_relay=relay_enabled)
         if settings.dev_auth_bypass:
@@ -64,15 +67,16 @@ def create_app_with(
 
 
 async def _maintenance_loop(infra: Infrastructure) -> None:
-    """In-process mode: lease reaper + deadline sweep at startup, then every few minutes.
-    (With CAMPAIGN_RUNNER=arq the worker runs the same jobs as cron tasks.)"""
-    reaper, deadlines = build_maintenance(infra)
+    """In-process mode: resume sweep (expired run leases) + deadline sweep every few minutes.
+    (With EXECUTION_MODE=arq the system worker runs the same jobs as cron tasks.)"""
+    _reaper, deadlines = build_maintenance(infra)
+    resume = build_resume(infra)
     while True:
         try:
-            reaped = await reaper.execute()
+            report = await resume.execute()
             expired = await deadlines.execute()
-            if reaped or expired:
-                log.info("applications.maintenance", reaped=reaped, expired=expired)
+            if report.campaigns_resumed or report.fills_resumed or report.reaped or expired:
+                log.info("applications.maintenance", expired=expired, **asdict(report))
         except Exception:
             log.exception("applications.maintenance_failed")
         await asyncio.sleep(infra.settings.maintenance_interval_seconds)

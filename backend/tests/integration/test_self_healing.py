@@ -16,7 +16,7 @@ import pytest
 import tests.fakes as fakes
 from app.application.discovery.use_cases import RunCampaign
 from app.bootstrap.app import create_app_with
-from app.bootstrap.container import Infrastructure, build_discovery_deps, build_sweep
+from app.bootstrap.container import Infrastructure, build_discovery_deps
 from app.domain.ports.discovery import SearchHit
 from app.infrastructure.runners.campaign_runners import InProcessCampaignRunner
 from tests.conftest import ApiUser, DatabaseUrls, register
@@ -262,24 +262,3 @@ async def test_retry_page_with_adaptive_strategy(
     )
     titles = [o["title"] for o in (await user.get("/api/v1/opportunities")).json()]
     assert "Omega Long-Read Fellowship" in titles
-
-
-async def test_interrupted_campaigns_are_swept_on_startup(
-    hclient: httpx.AsyncClient, infra: Infrastructure, portal: Portal
-) -> None:
-    from app.domain.discovery.models import CampaignPhase
-    from app.domain.shared.enums import CampaignStatus
-
-    user = await _user(hclient)
-    detail = await _run(user, target_urls=[portal.base + "/long-blog"])
-    cid = detail["campaign"]["id"]
-    import uuid as _uuid
-
-    async with infra.uow_factory(user.id) as uow:
-        await uow.campaigns.update_state(
-            user.id, _uuid.UUID(cid), status=CampaignStatus.RUNNING, phase=CampaignPhase.CRAWLING
-        )
-        await uow.commit()
-    assert await build_sweep(infra).execute() == 1
-    swept = (await user.get(f"/api/v1/campaigns/{cid}")).json()["campaign"]
-    assert swept["status"] == "FAILED" and "interrupted" in swept["error"]

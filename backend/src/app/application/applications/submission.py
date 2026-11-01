@@ -560,10 +560,18 @@ class ReapLeases:
     system_uow_factory: IUnitOfWorkFactory
     clock: Clock
 
-    async def execute(self) -> int:
+    async def execute(
+        self, horizon: datetime | None = None, *, spare_pending_after: datetime | None = None
+    ) -> int:
+        """`horizon`: leases expiring before it count as dead (default: now). At an in-process
+        restart every lease belonged to the dead process, so the caller passes a far horizon."""
         now = self.clock.now()
         async with self.system_uow_factory() as uow:
-            items = await uow.app_details.stale_leases(now, [S.PREPARING, S.FILLING, S.SUBMITTING])
+            items = await uow.app_details.stale_leases(
+                horizon or now,
+                [S.PREPARING, S.FILLING, S.SUBMITTING],
+                spare_pending_after=spare_pending_after,
+            )
             for app, opp in items:
                 if app.state is S.SUBMITTING:
                     target = S.SUBMISSION_FAILED

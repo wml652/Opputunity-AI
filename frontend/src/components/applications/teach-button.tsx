@@ -16,7 +16,7 @@ export function TeachButton({ applicationId, compact = false }: { applicationId:
   if (teach.isSuccess && !finish.isSuccess) {
     return (
       <span className="inline-flex items-center gap-1">
-        <span className="text-2xs text-warn">Teaching - apply in the opened window</span>
+        <span className="text-2xs text-warn">Teaching - apply in the opened browser</span>
         <Button size="sm" variant="primary" onClick={() => finish.mutate(applicationId)} disabled={finish.isPending}>
           Finish training &amp; save
         </Button>

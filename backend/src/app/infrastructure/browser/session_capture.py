@@ -1,6 +1,7 @@
 """Headful session capture: the USER passes a bot challenge or signs in, we keep the cookies.
 
-A visible Chromium window opens on the user's own machine (local runtime only), behind the same
+A visible Chromium window opens on the user's own machine (local runtime), or - on a server -
+a headless Chromium is streamed into the console (`hitl` session, RemoteView), behind the same
 SSRF egress proxy as every other browser. We poll until the page is usable - no challenge
 interstitial, real content (or, for LinkedIn, a signed-in session) - and return the context's
 `storage_state`. Nothing here clicks, types or solves anything."""
@@ -14,6 +15,10 @@ import time
 from typing import Any
 
 from app.domain.discovery.playbook import detect_bot_challenge
+from app.domain.ports.hitl import VIEWPORT, HitlSession
+from app.domain.ports.system import IBrowserSlots
+from app.infrastructure.browser.remote_hub import RedisRemoteBrowserHub
+from app.infrastructure.browser.remote_view import RemoteView
 from app.infrastructure.scraping.egress_proxy import EgressProxy
 from app.infrastructure.scraping.fetchers import USER_AGENT
 from app.infrastructure.scraping.ssrf_guard import SsrfGuard
@@ -27,29 +32,60 @@ class SessionCaptureError(Exception):
 
 
 class PlaywrightSessionCapturer:
-    def __init__(self, guard: SsrfGuard) -> None:
+    def __init__(
+        self,
+        guard: SsrfGuard,
+        *,
+        hub: RedisRemoteBrowserHub | None = None,
+        slots: IBrowserSlots | None = None,
+    ) -> None:
         self._guard = guard
+        self._hub = hub
+        self._slots = slots
 
-    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
+    async def capture(
+        self,
+        url: str,
+        *,
+        timeout_s: float,
+        wait_for_close: bool = False,
+        hitl: HitlSession | None = None,
+    ) -> str:
         """`wait_for_close`: portal sign-ins - keep the window open until the USER closes it
-        (signing in takes time); cookies are snapshotted while it is open."""
+        (signing in takes time); cookies are snapshotted while it is open.
+        `hitl`: run headless and stream the browser into the console instead of a window."""
         await self._guard.validate(url)
+        if hitl is not None and self._hub is None:
+            raise SessionCaptureError("remote browser sessions are not configured")
+        slot = self._slots.slot("hitl") if self._slots is not None else contextlib.nullcontext()
+        async with slot:
+            return await self._capture(url, timeout_s, wait_for_close, hitl)
+
+    async def _capture(
+        self, url: str, timeout_s: float, wait_for_close: bool, hitl: HitlSession | None
+    ) -> str:
         from playwright.async_api import async_playwright
 
         proxy = EgressProxy(self._guard)
         port = await proxy.start()
         pw = await async_playwright().start()
         browser: Any = None
+        view: RemoteView | None = None
         try:
             browser = await pw.chromium.launch(
-                headless=False,
+                headless=hitl is not None,
                 proxy={"server": f"http://127.0.0.1:{port}", "bypass": "<-loopback>"},
                 args=["--proxy-bypass-list=<-loopback>"],
             )
             context = await browser.new_context(
-                user_agent=USER_AGENT, locale="en-US", viewport={"width": 1280, "height": 900}
+                user_agent=USER_AGENT,
+                locale="en-US",
+                viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
             )
             page = await context.new_page()
+            if hitl is not None and self._hub is not None:
+                view = RemoteView(self._hub, hitl)
+                await view.attach(context, page)
             with contextlib.suppress(Exception):
                 await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             deadline = time.monotonic() + timeout_s
@@ -79,6 +115,8 @@ class PlaywrightSessionCapturer:
                 return snapshot
             raise SessionCaptureError(f"not completed within {int(timeout_s)} s")
         finally:
+            if view is not None:
+                await view.detach()
             with contextlib.suppress(Exception):
                 if browser is not None:
                     await browser.close()

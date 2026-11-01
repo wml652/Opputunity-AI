@@ -75,6 +75,7 @@ class Application:
     updated_at: datetime
     version: int = 1
     last_error: str | None = None  # why the last run stopped (blocked / failed)
+    resume_count: int = 0  # automatic resumes after a worker restart (capped)
 
 
 @dataclass(frozen=True, slots=True)

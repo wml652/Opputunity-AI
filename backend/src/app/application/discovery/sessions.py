@@ -28,6 +28,7 @@ from app.domain.events.models import NewEvent
 from app.domain.llm.provider import last4
 from app.domain.ports.crypto import ICipher, aad
 from app.domain.ports.discovery import IHeadfulSessionCapturer
+from app.domain.ports.hitl import HitlSession, IRemoteBrowserHub
 from app.domain.ports.net import IUrlGuard
 from app.domain.ports.uow import IUnitOfWorkFactory
 from app.domain.shared.clock import Clock
@@ -46,8 +47,10 @@ class SessionDeps:
     cipher: ICipher
     clock: Clock
     url_guard: IUrlGuard
-    capturer: IHeadfulSessionCapturer | None  # None in production / headless servers
+    capturer: IHeadfulSessionCapturer | None  # None when no browser is installed
     spawn: Callable[[Coroutine[Any, Any, None]], None]
+    # Servers: the browser runs headless and is streamed into the console (None = local window).
+    hub: IRemoteBrowserHub | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,12 +129,14 @@ class CaptureBrowserSession:
         tos_acknowledged: bool = False,
         daily_action_cap: int | None = None,
         on_captured: Callable[[], Awaitable[None]] | None = None,
+        application_id: uuid.UUID | None = None,
     ) -> str:
-        """`on_captured` runs after the cookies are stored (e.g. resume a blocked application)."""
+        """`on_captured` runs after the cookies are stored (e.g. resume a blocked application).
+        `application_id`: the application a portal sign-in is for (shown in the console)."""
         if self.deps.capturer is None:
             raise ValidationError(
-                "solving challenges needs a visible browser on your own computer; it is only "
-                "available when the app runs locally"
+                "solving challenges needs a browser: install Playwright's Chromium on this "
+                "machine (or enable remote browser sessions on the server)"
             )
         if kind not in SessionKind.ALL:
             raise ValidationError("unknown session kind")
@@ -150,9 +155,29 @@ class CaptureBrowserSession:
         domain = registrable_host(normalized) or (urlsplit(normalized).hostname or "")
         if not domain:
             raise ValidationError("URL has no host")
+        hitl: HitlSession | None = None
+        if self.deps.hub is not None:
+            hitl = HitlSession(
+                id=new_uuid7(),
+                user_id=user_id,
+                kind=kind,
+                title=f"Sign in to {domain}" if kind != SessionKind.CHALLENGE else domain,
+                url=normalized,
+                application_id=application_id,
+                started_at=self.deps.clock.now().isoformat(),
+            )
+            await self.deps.hub.open(hitl)
+            await _emit(self.deps, user_id, "hitl.session_opened", hitl.to_dict())
         self.deps.spawn(
             self._capture(
-                user_id, normalized, domain, kind, tos_acknowledged, daily_action_cap, on_captured
+                user_id,
+                normalized,
+                domain,
+                kind,
+                tos_acknowledged,
+                daily_action_cap,
+                on_captured,
+                hitl,
             )
         )
         return domain
@@ -166,6 +191,7 @@ class CaptureBrowserSession:
         tos_acknowledged: bool,
         daily_action_cap: int | None,
         on_captured: Callable[[], Awaitable[None]] | None = None,
+        hitl: HitlSession | None = None,
     ) -> None:
         assert self.deps.capturer is not None
         try:
@@ -173,6 +199,7 @@ class CaptureBrowserSession:
                 url,
                 timeout_s=PORTAL_TIMEOUT_S if kind == SessionKind.PORTAL else CAPTURE_TIMEOUT_S,
                 wait_for_close=kind == SessionKind.PORTAL,
+                hitl=hitl,
             )
         except Exception as exc:  # noqa: BLE001 - reported to the user, never raised further
             await _emit(
@@ -182,6 +209,10 @@ class CaptureBrowserSession:
                 {"domain": domain, "kind": kind, "error": str(exc)[:300]},
             )
             return
+        finally:
+            if hitl is not None and self.deps.hub is not None:
+                await self.deps.hub.close(user_id, hitl.id)
+                await _emit(self.deps, user_id, "hitl.session_closed", {"id": str(hitl.id)})
         now = self.deps.clock.now()
         async with self.deps.uow_factory(user_id) as uow:
             existing = await uow.browser_sessions.find(user_id, domain, kind)

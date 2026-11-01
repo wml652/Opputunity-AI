@@ -35,13 +35,15 @@ FillObserver = Callable[[LiveStep, bytes | None], Awaitable[None]]
 
 
 class ILiveFrameStore(Protocol):
-    """Latest browser frame per running application (in memory; frames are never persisted)."""
+    """Latest browser frame per running application (memory / Redis TTL; never persisted)."""
 
-    def put(self, user_id: uuid.UUID, application_id: uuid.UUID, frame: bytes) -> int:
+    async def put(self, user_id: uuid.UUID, application_id: uuid.UUID, frame: bytes) -> int:
         """Store the newest frame; returns its sequence number."""
         ...
 
-    def get(self, user_id: uuid.UUID, application_id: uuid.UUID) -> tuple[int, bytes] | None: ...
+    async def get(
+        self, user_id: uuid.UUID, application_id: uuid.UUID
+    ) -> tuple[int, bytes] | None: ...
 
 
 class IFormFiller(Protocol):
@@ -170,9 +172,31 @@ class IApplicationDetailRepository(Protocol):
         ...
 
     async def stale_leases(
-        self, now: datetime, states: Sequence[ApplicationState]
+        self,
+        now: datetime,
+        states: Sequence[ApplicationState],
+        *,
+        spare_pending_after: datetime | None = None,
     ) -> list[tuple[Application, Opportunity]]:
-        """System scope: applications in `states` whose worker lease expired."""
+        """System scope: applications in `states` whose worker lease expired before `now`.
+        `spare_pending_after`: skip resumed runs still waiting for a worker past that time."""
+        ...
+
+    async def claim_lease(
+        self,
+        user_id: uuid.UUID,
+        application_id: uuid.UUID,
+        owner: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        """Take (or renew) the run lease unless another live owner holds it."""
+        ...
+
+    async def mark_resumed(
+        self, user_id: uuid.UUID, application_id: uuid.UUID, pending_until: datetime
+    ) -> None:
+        """Count one automatic resume; the run waits under the pending owner until claimed."""
         ...
 
     async def transitions(

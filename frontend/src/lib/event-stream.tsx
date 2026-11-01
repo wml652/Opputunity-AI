@@ -40,6 +40,8 @@ const APPLICATION_EVENTS = new Set([
   "applications.auto_staged",
 ]);
 const SESSION_EVENTS = new Set(["session.captured", "session.failed"]);
+// Remote browser sessions on the server (Teach Mode, sign-in, challenges): the dock opens them.
+const HITL_EVENTS = new Set(["hitl.session_opened", "hitl.session_closed"]);
 
 export type StreamState = "connecting" | "live" | "reconnecting";
 
@@ -170,6 +172,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       if (DISCOVERY_EVENTS.has(event.type)) scheduleDiscoveryRefresh();
       if (APPLICATION_EVENTS.has(event.type)) coalesce("applications", [["m4"], keys.inbox], 300);
       if (SESSION_EVENTS.has(event.type)) coalesce("sessions", [["sessions"]], 200);
+      if (HITL_EVENTS.has(event.type)) coalesce("hitl", [["hitl"]], 100);
     };
 
     const open = () => {

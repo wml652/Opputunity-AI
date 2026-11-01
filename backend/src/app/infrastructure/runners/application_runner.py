@@ -1,16 +1,61 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from app.application.applications.submission import RunSubmission
 from app.application.applications.use_cases import RunApplication
-from app.domain.ports.system import ISystemResources
+from app.domain.ports.system import IBrowserSlots, ISystemResources
 from app.infrastructure.logging import get_logger
 from app.infrastructure.runtime.resources import wait_for_memory
 
 log = get_logger(__name__)
+
+
+async def run_with_browser(
+    job: Callable[[uuid.UUID, uuid.UUID], Awaitable[object]],
+    user_id: uuid.UUID,
+    application_id: uuid.UUID,
+    *,
+    slots: IBrowserSlots | None,
+    resources: ISystemResources | None,
+    min_free_mb: int,
+) -> None:
+    """Each fill / submission launches one Chromium: take a slot in the global browser pool,
+    then make sure there is memory for it (never start one into an out-of-memory kill)."""
+    slot = slots.slot("auto") if slots is not None else contextlib.nullcontext()
+    async with slot:
+        if resources is not None and min_free_mb > 0:
+            enough = await wait_for_memory(resources, min_free_mb)
+            if not enough:
+                log.warning(
+                    "memory.low_starting_anyway",
+                    application_id=str(application_id),
+                    min_free_mb=min_free_mb,
+                )
+        await job(user_id, application_id)
+
+
+class ArqApplicationRunner:
+    """Enqueues fills / submissions on the arq `browser` queue (production / multi-process).
+    No arq job id: a finished job's result would block a later run of the same application;
+    the run lease (claimed inside RunApplication) already guarantees one run at a time."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    async def start(self, user_id: uuid.UUID, application_id: uuid.UUID) -> None:
+        await self._pool.enqueue_job(
+            "run_application", str(user_id), str(application_id), _queue_name="arq:browser"
+        )
+
+    async def submit(self, user_id: uuid.UUID, application_id: uuid.UUID) -> None:
+        await self._pool.enqueue_job(
+            "run_submission", str(user_id), str(application_id), _queue_name="arq:browser"
+        )
 
 
 class InProcessApplicationRunner:
@@ -24,7 +69,9 @@ class InProcessApplicationRunner:
         max_parallel: int = 2,
         resources: ISystemResources | None = None,
         min_free_memory_mb: int = 0,
+        slots: IBrowserSlots | None = None,
     ) -> None:
+        self._browser_slots = slots
         self._run = run
         self._resources = resources
         self._min_free_mb = min_free_memory_mb
@@ -66,16 +113,14 @@ class InProcessApplicationRunner:
     ) -> None:
         try:
             async with self._slots:
-                # Each run launches a Chromium: do not start one into an out-of-memory kill.
-                if self._resources is not None and self._min_free_mb > 0:
-                    enough = await wait_for_memory(self._resources, self._min_free_mb)
-                    if not enough:
-                        log.warning(
-                            "memory.low_starting_anyway",
-                            application_id=str(application_id),
-                            min_free_mb=self._min_free_mb,
-                        )
-                await job(user_id, application_id)
+                await run_with_browser(
+                    job,
+                    user_id,
+                    application_id,
+                    slots=self._browser_slots,
+                    resources=self._resources,
+                    min_free_mb=self._min_free_mb,
+                )
         except Exception:
             log.exception(
                 "application.runner_crashed", application_id=str(application_id), kind=kind

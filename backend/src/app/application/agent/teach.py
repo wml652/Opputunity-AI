@@ -44,6 +44,7 @@ from app.domain.discovery.sessions import BROWSER_SESSION_AAD, BrowserSession, S
 from app.domain.events.models import NewEvent
 from app.domain.ports.agent import ITeachRecorder, TeachResult
 from app.domain.ports.crypto import ICipher, aad
+from app.domain.ports.hitl import TEACH, HitlSession, IRemoteBrowserHub
 from app.domain.ports.uow import IUnitOfWorkFactory
 from app.domain.profile.evidence import redact_pii
 from app.domain.shared.clock import Clock
@@ -69,12 +70,15 @@ class TeachDeps:
     start: StartFilling
     spawn: Callable[[Coroutine[Any, Any, None]], None]
     training: TrajectoryService | None = None  # DOM-RAG memory + imitation-learning data
+    # Servers: the browser runs headless and is streamed into the console (None = local window).
+    hub: IRemoteBrowserHub | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TeachStarted:
     application_id: uuid.UUID
     url: str
+    session_id: uuid.UUID | None = None  # remote browser session (servers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,12 +95,13 @@ class LearnedSummary:
 class TeachAgentSession:
     deps: TeachDeps
     active: dict[uuid.UUID, asyncio.Event] = field(default_factory=dict)
+    remote: dict[uuid.UUID, HitlSession] = field(default_factory=dict)
 
     async def execute(self, user_id: uuid.UUID, application_id: uuid.UUID) -> TeachStarted:
         if self.deps.recorder is None:
             raise ValidationError(
-                "Teach Mode needs a visible browser on your own computer; it is only available "
-                "when the app runs locally"
+                "Teach Mode needs a browser: install Playwright's Chromium on this machine (or "
+                "enable remote browser sessions on the server)"
             )
         async with self.deps.uow_factory(user_id) as uow:
             found = await uow.app_details.get(user_id, application_id)
@@ -123,21 +128,40 @@ class TeachAgentSession:
         )
         stop = asyncio.Event()
         self.active[application_id] = stop
-        self.deps.spawn(self._run(user_id, application_id, opp.title, url, state, stop))
-        return TeachStarted(application_id, url)
+        hitl: HitlSession | None = None
+        if self.deps.hub is not None:
+            hitl = HitlSession(
+                id=new_uuid7(),
+                user_id=user_id,
+                kind=TEACH,
+                title=opp.title,
+                url=url,
+                application_id=application_id,
+                started_at=self.deps.clock.now().isoformat(),
+            )
+            await self.deps.hub.open(hitl)
+            self.remote[application_id] = hitl
+            await self._event(user_id, application_id, "hitl.session_opened", hitl.to_dict())
+        self.deps.spawn(self._run(user_id, application_id, opp.title, url, state, stop, hitl))
+        return TeachStarted(application_id, url, hitl.id if hitl else None)
 
     async def workflows(self, user_id: uuid.UUID) -> list[AgentWorkflow]:
         async with self.deps.uow_factory(user_id) as uow:
             return await uow.agent_workflows.list(user_id)
 
-    def finish(self, application_id: uuid.UUID) -> bool:
+    async def finish(self, user_id: uuid.UUID, application_id: uuid.UUID) -> bool:
         """ "Finish training & save to brain" from the console (the in-page button does the
-        same). False if no Teach Mode window is open for this application."""
+        same). False if no Teach Mode window is open for this application. A remote session is
+        finished through the hub, so it works from any API replica."""
         stop = self.active.get(application_id)
-        if stop is None:
-            return False
-        stop.set()
-        return True
+        if stop is not None:
+            stop.set()
+            return True
+        if self.deps.hub is not None:
+            for session in await self.deps.hub.list(user_id):
+                if session.kind == TEACH and session.application_id == application_id:
+                    return await self.deps.hub.send_input(user_id, session.id, {"type": "finish"})
+        return False
 
     async def _pii_values(self, user_id: uuid.UUID) -> list[str]:
         view = await self.deps.get_profile.execute(user_id)
@@ -161,6 +185,7 @@ class TeachAgentSession:
         url: str,
         state: str | None,
         stop: asyncio.Event,
+        hitl: HitlSession | None = None,
     ) -> None:
         assert self.deps.recorder is not None
         pii = await self._pii_values(user_id)
@@ -192,7 +217,12 @@ class TeachAgentSession:
 
         try:
             result = await self.deps.recorder.record(
-                url, storage_state=state, on_step=on_step, timeout_s=TEACH_TIMEOUT_S, stop=stop
+                url,
+                storage_state=state,
+                on_step=on_step,
+                timeout_s=TEACH_TIMEOUT_S,
+                stop=stop,
+                hitl=hitl,
             )
         except Exception as exc:  # noqa: BLE001 - reported to the user, never raised further
             await self._event(
@@ -201,6 +231,12 @@ class TeachAgentSession:
             return
         finally:
             self.active.pop(application_id, None)
+            if hitl is not None and self.deps.hub is not None:
+                self.remote.pop(application_id, None)
+                await self.deps.hub.close(user_id, hitl.id)
+                await self._event(
+                    user_id, application_id, "hitl.session_closed", {"id": str(hitl.id)}
+                )
         try:
             summary = await self._learn(user_id, application_id, result, pii)
         except DomainError as exc:

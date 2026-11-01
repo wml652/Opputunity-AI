@@ -9,7 +9,6 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import timedelta
 from typing import Any
 
 from app.application.agent.navigator import llm_navigator
@@ -26,6 +25,7 @@ from app.application.notifications.use_cases import NotifyUser
 from app.application.profile.use_cases import DownloadDocument, GetProfile
 from app.application.services.evidence import ProfileEvidenceRetriever
 from app.application.services.field_mapper import DocumentRef, FieldMapper, normalize_label
+from app.application.services.leases import LEASE_TTL, kept_lease, run_owner
 from app.application.training.service import TrajectoryService
 from app.domain.agent.models import detect_ats, workflow_domain
 from app.domain.applications.filling import (
@@ -70,7 +70,6 @@ from app.domain.shared.ids import new_uuid7
 from app.domain.training.models import Demonstration, TrajectorySource
 
 S = ApplicationState
-FILL_LEASE = timedelta(minutes=30)
 MAX_BATCH = 25
 # Profile facts that are PII: redacted from every evidence snippet before a model sees it.
 PII_FACT_KEYS = frozenset(
@@ -115,6 +114,8 @@ class ApplicationDeps:
     chat: ResolveChatProvider | None = None
     # DOM-RAG memory + trajectory recording (imitation-learning data).
     training: TrajectoryService | None = None
+    # Identity of this process in run leases (host:pid[:queue]); set by the composition root.
+    runner_id: str = "in-process"
 
 
 async def _transition(
@@ -170,6 +171,13 @@ class RunApplication:
                 raise NotFoundError("application not found")
             app, opp = found
             now = self.deps.clock.now()
+            if app.state not in (S.QUEUED, S.RESUME_QUEUED, S.FILLING):
+                return None
+            # Worker lease (renewed while the run lasts): exactly one live run per application;
+            # if this process dies the resume sweep restarts the fill from its saved state.
+            owner = run_owner(self.deps.runner_id)
+            if not await uow.app_details.claim_lease(user_id, app.id, owner, now, now + LEASE_TTL):
+                return None  # another worker is filling it right now
             if app.state is S.QUEUED:
                 await _transition(
                     uow,
@@ -202,13 +210,17 @@ class RunApplication:
                     at=now,
                     title=opp.title,
                 )
-            elif app.state is not S.FILLING:
-                return None
-            # Worker lease: the reaper hands the run back to the user if this process dies.
-            await uow.app_details.set_lease(user_id, app.id, "in-process", now + FILL_LEASE)
             await uow.commit()
+
+        async def renew() -> None:
+            at = self.deps.clock.now()
+            async with self.deps.uow_factory(user_id) as uow:
+                await uow.app_details.claim_lease(user_id, app.id, owner, at, at + LEASE_TTL)
+                await uow.commit()
+
         try:
-            return await self._run(user_id, app, opp)
+            async with kept_lease(renew):
+                return await self._run(user_id, app, opp)
         finally:
             async with self.deps.uow_factory(user_id) as uow:
                 await uow.app_details.set_lease(user_id, app.id, None, None)

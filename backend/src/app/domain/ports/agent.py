@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.domain.agent.models import AgentWorkflow, AtsType, NavDecision, TeachStep
+from app.domain.ports.hitl import HitlSession
 from app.domain.training.models import Demonstration
 
 # (page snapshot text, goal) -> the next action, decided by the user's own model.
@@ -40,8 +41,10 @@ class ITeachRecorder(Protocol):
         on_step: StepSink,
         timeout_s: float,
         stop: asyncio.Event,
+        hitl: HitlSession | None = None,
     ) -> TeachResult:
-        """Open a VISIBLE browser at `url`, record what the user does (clicks, navigation, field
+        """Open a VISIBLE browser at `url` (or, with `hitl`, a remote one streamed into the
+        console), record what the user does (clicks, navigation, field
         values - never passwords) until they finish, close the window or time out."""
         ...
 

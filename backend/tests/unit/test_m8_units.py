@@ -248,14 +248,14 @@ def test_official_search_hit_picker() -> None:
     assert pick_official_search_hit(hits[:2], "Omega University Scholarship", None) is None
 
 
-def test_live_frame_store_is_per_user_and_bounded() -> None:
+async def test_live_frame_store_is_per_user_and_bounded() -> None:
     store = InMemoryLiveFrameStore(max_frames=2)
     alice, bob, app = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    seq = store.put(alice, app, b"\xff\xd8one")
-    assert store.get(alice, app) == (seq, b"\xff\xd8one")
-    assert store.get(bob, app) is None  # never another tenant's frame
-    store.put(alice, uuid.uuid4(), b"2")
-    store.put(alice, uuid.uuid4(), b"3")
-    assert store.get(alice, app) is None  # evicted (LRU)
+    seq = await store.put(alice, app, b"\xff\xd8one")
+    assert await store.get(alice, app) == (seq, b"\xff\xd8one")
+    assert await store.get(bob, app) is None  # never another tenant's frame
+    await store.put(alice, uuid.uuid4(), b"2")
+    await store.put(alice, uuid.uuid4(), b"3")
+    assert await store.get(alice, app) is None  # evicted (LRU)
     assert WorkMode.REMOTE.value == "REMOTE" and EnglishProficiency.NATIVE.value == "NATIVE"
     assert Decimal("1") == Decimal(1)
