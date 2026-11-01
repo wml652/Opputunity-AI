@@ -12,7 +12,12 @@ RUN corepack enable
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT=standalone
+# The /api rewrite target is baked into the build (routes manifest): pass the API's address on
+# the container network, e.g. --build-arg BACKEND_URL=http://ootg-api (Azure Container Apps
+# internal ingress) or http://api:8000 (docker compose). WebSocket upgrades on /api (remote
+# browser sessions) are proxied by the Next.js server to the same target.
+ARG BACKEND_URL=http://api:8000
+ENV NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT=standalone BACKEND_URL=$BACKEND_URL
 RUN mkdir -p public && pnpm build
 
 FROM node:20-bookworm-slim
@@ -24,6 +29,6 @@ COPY --from=build --chown=app:app /app/.next/static ./.next/static
 COPY --from=build --chown=app:app /app/public ./public
 USER app
 EXPOSE 3000
-# BACKEND_URL (e.g. http://api:8000) is read at build time for rewrites; set it as a build arg
-# or bake the production URL into the image.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "server.js"]

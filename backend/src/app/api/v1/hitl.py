@@ -201,6 +201,8 @@ async def _pump_frames(
             if await hub.get(user_id, session_id) is None:
                 await websocket.send_json({"type": "closed"})
                 return
+            # Keepalive: cloud ingresses (Azure Container Apps: 240 s) drop idle WebSockets.
+            await websocket.send_json({"type": "ping"})
             continue
         if frame == b"":  # the hub's "session ended" marker
             await websocket.send_json({"type": "closed"})

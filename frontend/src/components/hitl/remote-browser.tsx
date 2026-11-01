@@ -50,7 +50,7 @@ export function RemoteBrowser({ session, onClose }: { session: HitlSessionT; onC
         const parsed = hitlControlSchema.safeParse(JSON.parse(msg.data));
         if (!parsed.success) return;
         if (parsed.data.type === "meta") setViewport(parsed.data.viewport);
-        else setConn("closed");
+        else if (parsed.data.type === "closed") setConn("closed");
         return;
       }
       const url = URL.createObjectURL(msg.data as Blob);

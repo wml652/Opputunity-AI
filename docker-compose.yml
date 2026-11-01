@@ -1,0 +1,154 @@
+# Production-shaped local stack mirroring the Azure topology:
+#   frontend  -> Azure Container App (external ingress; proxies /api + WebSockets to api)
+#   api       -> Azure Container App (internal ingress; remote browser sessions, migrations)
+#   worker-*  -> Azure Container Apps (no ingress; arq queues system / discovery / browser)
+#   postgres  -> Azure Database for PostgreSQL Flexible Server (pgvector)
+#   redis     -> Azure Cache for Redis (rediss://...:6380 on Azure)
+#
+#   cp deploy/compose/compose.env.example deploy/compose/compose.env   # fill in secrets
+#   docker compose --env-file deploy/compose/compose.env up --build
+#   open http://localhost:3000
+#
+# Resource limits roughly match Container Apps sizes (each Chromium needs ~300-500 MB).
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  EXECUTION_MODE: arq
+  HITL_MODE: remote
+  DATABASE_URL: postgresql+asyncpg://${APP_DB_USER:?}:${APP_DB_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+  DATABASE_MIGRATION_URL: postgresql+asyncpg://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+  REDIS_URL: redis://redis:6379/0
+  ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?generate with app.infrastructure.crypto.keygen}
+  JWT_SECRET: ${JWT_SECRET:?set a 32+ character secret}
+  COOKIE_SECURE: ${COOKIE_SECURE:-true}
+  CORS_ORIGINS: '["${CONSOLE_URL:-http://localhost:3000}"]'
+  CONSOLE_URL: ${CONSOLE_URL:-http://localhost:3000}
+  MAX_BROWSERS: ${MAX_BROWSERS:-3}
+  MAX_HITL_BROWSERS: ${MAX_HITL_BROWSERS:-2}
+  OUTBOX_RELAY_IN_API: "false" # the system worker relays events
+  # Encrypted documents are written by the api and read by the browser worker (uploads): one
+  # shared volume here, an Azure Files share mounted at /data on Container Apps.
+  STORAGE_DIR: /data/storage
+  LOGS_DIR: /data/logs
+
+x-worker: &worker
+  build:
+    context: ./backend
+    dockerfile: Dockerfile.worker
+  image: ootg-worker:local
+  restart: unless-stopped
+  depends_on:
+    api:
+      condition: service_healthy # migrations have run
+  volumes:
+    - app-data:/data
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      APP_DB_USER: ${APP_DB_USER:?}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./deploy/compose/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Queues and the browser pool live here: never evict keys under memory pressure.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 384m }
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    image: ootg-api:local
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "true"
+    volumes:
+      - app-data:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      # /ready = database + Redis reachable (503 otherwise); migrations finish before serving.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=4).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 3g } # + up to MAX_HITL_BROWSERS remote Chromiums
+
+  worker-system:
+    <<: *worker
+    environment:
+      <<: *backend-env
+      WORKER_QUEUE: system
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512m }
+
+  worker-discovery:
+    <<: *worker
+    environment:
+      <<: *backend-env
+      WORKER_QUEUE: discovery
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 2g } # crawler Chromium per running campaign
+
+  worker-browser:
+    <<: *worker
+    environment:
+      <<: *backend-env
+      WORKER_QUEUE: browser
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 4g } # MAX_BROWSERS fills / submissions
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: http://api:8000
+    image: ootg-web:local
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      api: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768m }
+
+volumes:
+  pg-data:
+  redis-data:
+  app-data:

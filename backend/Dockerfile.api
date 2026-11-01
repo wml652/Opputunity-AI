@@ -20,7 +20,7 @@ COPY --from=build /app/.venv /app/.venv
 RUN /app/.venv/bin/playwright install --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system app && useradd --system --gid app --home /app app \
-    && chown -R app:app /ms-playwright
+    && mkdir -p /data/storage /data/logs && chown -R app:app /ms-playwright /data
 WORKDIR /app
 COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -29,11 +29,15 @@ ENV PATH="/app/.venv/bin:$PATH" \
     EXECUTION_MODE=arq \
     HITL_MODE=remote \
     ALLOW_HEADFUL_CAPTURE=false \
-    LOG_JSON=true
+    LOG_JSON=true \
+    STORAGE_DIR=/data/storage \
+    LOGS_DIR=/data/logs
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4).status == 200 else 1)"
-# Migrations run as a release step with the OWNER role (DATABASE_MIGRATION_URL), e.g.
-#   docker run --rm -e DATABASE_MIGRATION_URL=... ootg-api alembic upgrade head
-CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]
+# Migrations: with RUN_MIGRATIONS=true every replica runs `migrate` (Alembic behind a Postgres
+# advisory lock, as the OWNER role DATABASE_MIGRATION_URL) before serving. Or run it once as a
+# release step / Container Apps job:  docker run --rm -e DATABASE_MIGRATION_URL=... ootg-api migrate
+ENV RUN_MIGRATIONS=false
+CMD ["sh", "-c", "if [ \"$RUN_MIGRATIONS\" = true ]; then migrate || exit 1; fi; exec serve --host 0.0.0.0 --port 8000"]

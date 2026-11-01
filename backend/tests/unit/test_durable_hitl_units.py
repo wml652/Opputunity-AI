@@ -120,3 +120,10 @@ def test_websocket_origin_check() -> None:
     assert origin_allowed("https://console.example.org", allowed)
     assert not origin_allowed("https://evil.example", allowed)
     assert origin_allowed(None, allowed)  # not a browser: cannot carry the cookies cross-site
+
+
+def test_migration_runner_uses_a_plain_asyncpg_dsn() -> None:
+    from app.migrate import asyncpg_dsn
+
+    assert asyncpg_dsn("postgresql+asyncpg://o:p@db:5432/x") == "postgresql://o:p@db:5432/x"
+    assert asyncpg_dsn("postgresql://o:p@db/x") == "postgresql://o:p@db/x"

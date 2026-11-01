@@ -33,3 +33,6 @@ node_modules/
 # Scratch
 .audit/
 .scratch/
+
+# Compose secrets (template: deploy/compose/compose.env.example)
+deploy/compose/compose.env

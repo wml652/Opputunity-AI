@@ -24,6 +24,7 @@ export const hitlControlSchema = z.discriminatedUnion("type", [
     title: z.string(),
   }),
   z.object({ type: z.literal("closed") }),
+  z.object({ type: z.literal("ping") }), // keepalive through cloud ingress idle timeouts
 ]);
 export type HitlControlT = z.infer<typeof hitlControlSchema>;
 

@@ -2,7 +2,7 @@
 # Worker image: arq queues (discovery / browser / system ...) with headless Chromium for the
 # crawler, the form filler and the final submitter.
 # Build:  docker build -f backend/Dockerfile.worker -t ootg-worker backend
-# Run one container per queue:  docker run ootg-worker worker --queue discovery|browser|system
+# Run one container per queue:  docker run -e WORKER_QUEUE=discovery|browser|system ootg-worker
 # (system = outbox relay, deadline sweep and the resume sweep for runs whose worker died).
 # Browsers are capped globally by MAX_BROWSERS (a Redis pool shared by every container).
 FROM python:3.12-slim-bookworm AS build
@@ -21,14 +21,21 @@ COPY --from=build /app/.venv /app/.venv
 RUN /app/.venv/bin/playwright install --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system app && useradd --system --gid app --home /app app \
-    && chown -R app:app /ms-playwright
+    && mkdir -p /data/storage /data/logs && chown -R app:app /ms-playwright /data
 WORKDIR /app
 COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     ENVIRONMENT=production \
     EXECUTION_MODE=arq \
+    HITL_MODE=remote \
     ALLOW_HEADFUL_CAPTURE=false \
-    LOG_JSON=true
+    LOG_JSON=true \
+    STORAGE_DIR=/data/storage \
+    LOGS_DIR=/data/logs
 USER app
-CMD ["worker", "--queue", "system"]
+# Alive = this container's worker heartbeat is in Redis (pass the same --queue as the CMD).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD sh -c 'worker --check --queue "${WORKER_QUEUE:-system}"'
+ENV WORKER_QUEUE=system
+CMD ["sh", "-c", "exec worker --queue \"$WORKER_QUEUE\""]

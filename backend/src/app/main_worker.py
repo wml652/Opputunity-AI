@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import socket
 from typing import Any
 
 from arq import cron
@@ -129,12 +130,32 @@ def build_worker(queue_name: str) -> Worker:
     )
 
 
+async def _check(queue_name: str) -> bool:
+    """Container health check: a worker of this queue on this host sent a heartbeat within
+    its TTL (WORKER_HEARTBEAT_TTL_SECONDS)."""
+    from redis.asyncio import Redis
+
+    redis = Redis.from_url(get_settings().redis_url)
+    try:
+        prefix = f"workers:heartbeat:{socket.gethostname()}:"
+        async for key in redis.scan_iter(match=f"{prefix}*:{queue_name}", count=100):
+            return bool(key)
+        return False
+    finally:
+        await redis.aclose()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run an arq worker")
     parser.add_argument("--queue", choices=QUEUES, default="system")
+    parser.add_argument(
+        "--check", action="store_true", help="exit 0 if this host's worker is alive"
+    )
     args = parser.parse_args()
 
     configure_event_loop()
+    if args.check:
+        raise SystemExit(0 if run(_check(args.queue)) else 1)
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_json)
 
