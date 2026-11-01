@@ -4,6 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { MatchScore, SortControls, type SortKey, type SortOrder } from "@/components/ui/sort-controls";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill, type Tone } from "@/components/ui/status";
 import { cn } from "@/lib/cn";
@@ -18,14 +19,25 @@ const RULE_TONE: Record<string, Tone> = { PASS: "ok", FAIL: "err", UNKNOWN: "war
 export function OpportunitiesView() {
   const [filter, setFilter] = useState<Outcome | "ALL">("ALL");
   const [selected, setSelected] = useState<string | null>(null);
-  const { data, isLoading } = useOpportunities(filter);
+  const [sort, setSort] = useState<SortKey>("match");
+  const [order, setOrder] = useState<SortOrder>("desc");
+  const { data, isLoading } = useOpportunities(filter, sort, order);
 
   return (
     <>
       <Panel
         title="Opportunities"
-        meta={data ? `${data.length} · sorted by deadline urgency` : undefined}
+        meta={data ? `${data.length}` : undefined}
         actions={
+          <div className="flex items-center gap-3">
+          <SortControls
+            sort={sort}
+            order={order}
+            onChange={(s, o) => {
+              setSort(s);
+              setOrder(o);
+            }}
+          />
           <div className="flex gap-px rounded-sm border border-line bg-line">
             {FILTERS.map((f) => (
               <button
@@ -41,11 +53,13 @@ export function OpportunitiesView() {
               </button>
             ))}
           </div>
+          </div>
         }
       >
         <table className="w-full table-fixed border-collapse">
           <thead>
             <tr>
+              <th className={cn(th, "w-14")}>Match</th>
               <th className={cn(th, "w-28")}>Outcome</th>
               <th className={th}>Opportunity</th>
               <th className={cn(th, "w-28")}>Type</th>
@@ -56,12 +70,15 @@ export function OpportunitiesView() {
           </thead>
           <tbody>
             {isLoading ? (
-              <EmptyRow colSpan={6}>Loading</EmptyRow>
+              <EmptyRow colSpan={7}>Loading</EmptyRow>
             ) : !data?.length ? (
-              <EmptyRow colSpan={6}>No opportunities{filter === "ALL" ? " yet. Launch a campaign from the Pipeline page." : ` with outcome ${filter}.`}</EmptyRow>
+              <EmptyRow colSpan={7}>No opportunities{filter === "ALL" ? " yet. Launch a campaign from the Pipeline page." : ` with outcome ${filter}.`}</EmptyRow>
             ) : (
               data.map((o) => (
                 <tr key={o.id} onClick={() => setSelected(o.id)} className="cursor-pointer hover:bg-surface-2">
+                  <td className={td} title={o.rank_breakdown?.reasons.join(" · ")}>
+                    <MatchScore score={o.match_score} />
+                  </td>
                   <td className={td}><OutcomePill outcome={o.latest_outcome} /></td>
                   <td className={cn(td, "py-1")}>
                     <div className="truncate text-xs font-medium">{o.title}</div>

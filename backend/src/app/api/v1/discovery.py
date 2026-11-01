@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
@@ -14,6 +14,7 @@ from app.application.discovery.use_cases import CampaignInput, PipelineSummary
 from app.domain.applications.models import Application
 from app.domain.discovery.models import Campaign, CampaignSettings, CrawledPage, Opportunity
 from app.domain.discovery.progress import campaign_progress
+from app.domain.discovery.ranking import RankBreakdown
 from app.domain.ports.discovery import OpportunityFilter, Verdict
 from app.domain.shared.enums import (
     ApplicationState,
@@ -26,6 +27,21 @@ from app.domain.shared.enums import (
 )
 
 router = APIRouter(tags=["discovery"])
+
+SortKey = Literal["match", "deadline", "title", "status"]
+SortOrder = Literal["asc", "desc"]
+ACTIVE_STATES = (
+    ApplicationState.QUEUED,
+    ApplicationState.PREPARING,
+    ApplicationState.FILLING,
+    ApplicationState.PAUSED_NEEDS_USER_INPUT,
+    ApplicationState.RESUME_QUEUED,
+    ApplicationState.BLOCKED_NEEDS_HUMAN,
+    ApplicationState.AWAITING_FINAL_VERIFICATION,
+    ApplicationState.SUBMIT_APPROVED,
+    ApplicationState.SUBMITTING,
+)
+
 
 # ---- schemas ------------------------------------------------------------------------------------
 
@@ -174,9 +190,11 @@ class OpportunityOut(BaseModel):
     ai_policy: str
     latest_outcome: EligibilityOutcome | None
     created_at: datetime
+    match_score: int | None = None  # 0-100, see domain.discovery.ranking
+    rank_breakdown: dict[str, Any] | None = None
 
     @staticmethod
-    def of(o: Opportunity) -> OpportunityOut:
+    def of(o: Opportunity, rank: RankBreakdown | None = None) -> OpportunityOut:
         return OpportunityOut(
             id=o.id,
             campaign_id=o.campaign_id,
@@ -194,6 +212,8 @@ class OpportunityOut(BaseModel):
             ai_policy=o.ai_policy.value,
             latest_outcome=o.latest_outcome,
             created_at=o.created_at,
+            match_score=rank.score if rank else None,
+            rank_breakdown=rank.to_dict() if rank else None,
         )
 
 
@@ -231,15 +251,19 @@ class QueueItemOut(BaseModel):
     priority_rank: int | None
     deadline_at: datetime | None
     opportunity: OpportunityOut
+    match_score: int | None = None
+    last_error: str | None = None
 
     @staticmethod
-    def of(app: Application, opp: Opportunity) -> QueueItemOut:
+    def of(app: Application, opp: Opportunity, rank: RankBreakdown | None = None) -> QueueItemOut:
         return QueueItemOut(
             application_id=app.id,
             state=app.state,
             priority_rank=app.priority_rank,
             deadline_at=app.deadline_at,
-            opportunity=OpportunityOut.of(opp),
+            opportunity=OpportunityOut.of(opp, rank),
+            match_score=rank.score if rank else None,
+            last_error=app.last_error,
         )
 
 
@@ -352,11 +376,41 @@ async def list_opportunities(
     campaign_id: uuid.UUID | None = None,
     q: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=200, ge=1, le=500),
+    sort: SortKey | None = None,
+    order: SortOrder = "desc",
 ) -> list[OpportunityOut]:
     items = await container.discovery.list_opportunities.execute(
-        user_id, OpportunityFilter(outcome=outcome, campaign_id=campaign_id, search=q, limit=limit)
+        user_id,
+        OpportunityFilter(outcome=outcome, campaign_id=campaign_id, search=q, limit=limit),
+        sort,
+        order,
     )
-    return [OpportunityOut.of(o) for o in items]
+    return [OpportunityOut.of(o, rank) for o, rank in items]
+
+
+class PortalRepairOut(BaseModel):
+    opportunity_id: uuid.UUID
+    title: str
+    old_url: str
+    new_url: str | None
+    reason: str
+
+
+@router.post("/opportunities/repair-portals", response_model=list[PortalRepairOut])
+async def repair_portals(user_id: CurrentUserId, container: Container) -> list[PortalRepairOut]:
+    """Re-resolve aggregator / blog `portal_url`s of queued or blocked applications to the
+    official outbound application link found on the page."""
+    results = await container.discovery.repair_portals.execute(user_id)
+    return [
+        PortalRepairOut(
+            opportunity_id=r.opportunity_id,
+            title=r.title,
+            old_url=r.old_url,
+            new_url=r.new_url,
+            reason=r.reason,
+        )
+        for r in results
+    ]
 
 
 @router.get("/opportunities/{opportunity_id}", response_model=OpportunityDetailOut)
@@ -370,8 +424,30 @@ async def get_opportunity(
 
 
 @router.get("/applications/queue", response_model=list[QueueItemOut])
-async def application_queue(user_id: CurrentUserId, container: Container) -> list[QueueItemOut]:
-    return [QueueItemOut.of(a, o) for a, o in await container.discovery.queue.execute(user_id)]
+async def application_queue(
+    user_id: CurrentUserId,
+    container: Container,
+    sort: SortKey | None = None,
+    order: SortOrder = "desc",
+) -> list[QueueItemOut]:
+    items = await container.discovery.queue.execute(user_id, sort=sort, order=order)
+    return [QueueItemOut.of(a, o, r) for a, o, r in items]
+
+
+@router.get("/applications", response_model=list[QueueItemOut])
+async def list_applications(
+    user_id: CurrentUserId,
+    container: Container,
+    state: list[ApplicationState] | None = Query(default=None),
+    sort: SortKey | None = "match",
+    order: SortOrder = "desc",
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> list[QueueItemOut]:
+    """Applications (default: every non-terminal state) with match scores, sortable."""
+    items = await container.discovery.queue.execute(
+        user_id, limit, sort=sort, order=order, states=state or list(ACTIVE_STATES)
+    )
+    return [QueueItemOut.of(a, o, r) for a, o, r in items]
 
 
 @router.get("/pipeline/summary", response_model=PipelineSummaryOut)

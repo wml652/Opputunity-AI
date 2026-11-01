@@ -35,6 +35,17 @@ TRANSITIONS: dict[ApplicationState, frozenset[ApplicationState]] = {
 }
 # Any non-terminal state may be expired by the deadline sweep, cancelled by the user, or failed.
 _ALWAYS = frozenset({S.EXPIRED, S.CANCELLED, S.FAILED})
+# The student submitted the form THEMSELVES in Teach Mode (a human action, not the agent's):
+# only Actor.USER may record it, from states where no agent submission is in flight.
+SELF_SUBMIT_FROM = frozenset(
+    {
+        S.QUEUED,
+        S.PAUSED_NEEDS_USER_INPUT,
+        S.BLOCKED_NEEDS_HUMAN,
+        S.RESUME_QUEUED,
+        S.AWAITING_FINAL_VERIFICATION,
+    }
+)
 
 
 class IllegalTransitionError(ConflictError):
@@ -63,6 +74,7 @@ class Application:
     created_at: datetime
     updated_at: datetime
     version: int = 1
+    last_error: str | None = None  # why the last run stopped (blocked / failed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +90,8 @@ class Transition:
 def advance(
     app: Application, target: ApplicationState, *, actor: Actor, reason: str, at: datetime
 ) -> Transition:
-    assert_transition(app.state, target)
+    if not (target is S.SUBMITTED and actor is Actor.USER and app.state in SELF_SUBMIT_FROM):
+        assert_transition(app.state, target)
     transition = Transition(app.id, app.state, target, actor, reason, at)
     app.state = target
     app.updated_at = at

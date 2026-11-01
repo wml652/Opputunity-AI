@@ -316,7 +316,9 @@ async def test_fetch_models_with_unsaved_key_and_saved_config(user: ApiUser) -> 
         "/api/v1/llm/fetch-models", json={"kind": "NVIDIA_NIM", "api_key": NIM_KEY}
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"base_url": NIM, "models": ["a/model", "z/model"]}
+    body = resp.json()
+    assert (body["base_url"], body["models"]) == (NIM, ["a/model", "z/model"])
+    assert [m["id"] for m in body["catalog"]] == ["a/model", "z/model"]  # categorised catalog
     assert listing.calls.last.request.headers["authorization"] == f"Bearer {NIM_KEY}"
     assert NIM_KEY not in resp.text
     saved = await _create(user, kind="NVIDIA_NIM", model="a/model", api_key=NIM_KEY)

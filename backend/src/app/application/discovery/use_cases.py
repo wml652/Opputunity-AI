@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.application.discovery.runner import CampaignRun
@@ -25,6 +25,7 @@ from app.domain.discovery.models import (
     clean_keywords,
     empty_counters,
 )
+from app.domain.discovery.ranking import RankBreakdown, rank_opportunity, sort_items
 from app.domain.discovery.sessions import SessionKind
 from app.domain.events.models import NewEvent
 from app.domain.ports.crypto import ICipher
@@ -80,13 +81,23 @@ class DiscoveryDeps:
     # Batch auto-stage (opt-in per campaign): prepare the top-N queued applications.
     # (user, campaign, limit, progress(done, total, current_title)) -> {final state: count}.
     # Fills the campaign's queued applications up to the final OK gate; never submits.
+    aggregator_domains: frozenset[str] = frozenset()  # extra hosts (settings)
     auto_stage: (
         Callable[
-            [uuid.UUID, uuid.UUID, int, Callable[[int, int, str | None], Awaitable[None]]],
+            [
+                uuid.UUID,
+                uuid.UUID,
+                int,
+                Callable[[int, int, str | None], Awaitable[None]],
+                list[uuid.UUID],
+            ],
             Awaitable[dict[str, int]],
         ]
         | None
     ) = None
+    # Streaming auto-apply: start filling one application the moment it is queued (the
+    # application runner bounds concurrency); None = only the end-of-campaign staging pass.
+    start_application: Callable[[uuid.UUID, uuid.UUID], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,11 +304,36 @@ class CancelCampaign:
 
 @dataclass(slots=True)
 class ListOpportunities:
-    uow_factory: IUnitOfWorkFactory
+    """Opportunities with their 0-100 match score; optionally sorted (match / deadline / title /
+    status, asc or desc). Without `sort` the repository order is kept."""
 
-    async def execute(self, user_id: uuid.UUID, flt: OpportunityFilter) -> list[Opportunity]:
+    uow_factory: IUnitOfWorkFactory
+    clock: Clock
+    aggregators: frozenset[str] = frozenset()
+
+    async def execute(
+        self,
+        user_id: uuid.UUID,
+        flt: OpportunityFilter,
+        sort: str | None = None,
+        order: str = "desc",
+    ) -> list[tuple[Opportunity, RankBreakdown]]:
+        wide = replace(flt, limit=max(flt.limit, 1000)) if sort else flt
         async with self.uow_factory(user_id) as uow:
-            return await uow.opportunities.search(user_id, flt)
+            items = await uow.opportunities.search(user_id, wide)
+            stored = await uow.profiles.get(user_id)
+        profile = stored.profile if stored else None
+        now = self.clock.now()
+        ranked = [(o, rank_opportunity(o, profile, now, self.aggregators)) for o in items]
+        ranked = sort_items(
+            ranked,
+            sort,
+            order,
+            opportunity=lambda r: r[0],
+            rank=lambda r: r[1],
+            status=lambda r: r[0].latest_outcome.value if r[0].latest_outcome else "",
+        )
+        return ranked[: flt.limit]
 
 
 @dataclass(slots=True)
@@ -349,13 +385,40 @@ class GetPipelineSummary:
 
 @dataclass(slots=True)
 class ListApplicationQueue:
+    """The queue (or, with `states`, any applications) with match scores, optionally sorted."""
+
     uow_factory: IUnitOfWorkFactory
+    clock: Clock
+    aggregators: frozenset[str] = frozenset()
 
     async def execute(
-        self, user_id: uuid.UUID, limit: int = 100
-    ) -> list[tuple[Application, Opportunity]]:
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        *,
+        sort: str | None = None,
+        order: str = "desc",
+        states: list[ApplicationState] | None = None,
+    ) -> list[tuple[Application, Opportunity, RankBreakdown]]:
         async with self.uow_factory(user_id) as uow:
-            return await uow.applications.queue(user_id, limit)
+            pairs = (
+                await uow.app_details.list_by_states(user_id, states)
+                if states
+                else await uow.applications.queue(user_id, limit)
+            )
+            stored = await uow.profiles.get(user_id)
+        profile = stored.profile if stored else None
+        now = self.clock.now()
+        ranked = [(a, o, rank_opportunity(o, profile, now, self.aggregators)) for a, o in pairs]
+        ranked = sort_items(
+            ranked,
+            sort,
+            order,
+            opportunity=lambda r: r[1],
+            rank=lambda r: r[2],
+            status=lambda r: r[0].state.value,
+        )
+        return ranked[:limit]
 
 
 # ---- the run ------------------------------------------------------------------------------------

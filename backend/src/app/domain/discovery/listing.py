@@ -309,3 +309,316 @@ def is_near_duplicate(
         # dilute two specific, matching titles.
         score = max(score, fuzzy_similarity(a.title, None, b.title, None))
     return score >= threshold
+
+
+# ---- aggregators and official application links ------------------------------------------------
+
+# Scholarship / opportunity aggregators and blogs: they describe programmes but are never the
+# place to apply. The form filler never types student data on these hosts (hard invariant) and
+# discovery replaces their URLs with the official outbound link found on the page.
+AGGREGATOR_DOMAINS = frozenset(
+    {
+        "opportunitiesradar.com",
+        "studyabroad.pk",
+        "pakadmissions.com",
+        "scholarships.com",
+        "scholarshiptab.com",
+        "uscholarships.us",
+        "teachwink.com",
+        "opportunitiescorners.info",
+        "opportunitiescorners.com",
+        "youthopportunitieshub.com",
+        "opportunitydesk.org",
+        "opportunitiesforafricans.com",
+        "opportunitiesforyouth.org",
+        "scholarshipsads.com",
+        "scholarship-positions.com",
+        "scholars4dev.com",
+        "afterschoolafrica.com",
+        "studyportals.com",
+        "mastersportal.com",
+        "scholarshipportal.com",
+        "internationalscholarships.com",
+        "scholarshipdb.net",
+        "fastweb.com",
+        "scholarshiproar.com",
+        "wemakescholars.com",
+        "buddy4study.com",
+        "scholarshipscorner.website",
+        "allscholarships.pk",
+        "study-abroad.org",
+        "educativz.com",
+        "jobz.pk",
+        "rozee.pk",
+    }
+)
+# Applicant tracking systems / form hosts: a link there is almost certainly the application.
+ATS_HOST_MARKERS = (
+    "myworkdayjobs.com",
+    "workday.com",
+    "greenhouse.io",
+    "lever.co",
+    "smartrecruiters.com",
+    "submittable.com",
+    "icims.com",
+    "taleo.net",
+    "successfactors.com",
+    "jobvite.com",
+    "ashbyhq.com",
+    "bamboohr.com",
+    "applytojob.com",
+    "breezy.hr",
+    "recruitee.com",
+    "teamtailor.com",
+    "slate.org",
+    "technolutions.net",
+    "commonapp.org",
+    "embark.com",
+    "forms.gle",
+    "docs.google.com/forms",
+    "typeform.com",
+    "jotform.com",
+    "formstack.com",
+    "forms.office.com",
+)
+_NOT_OUTBOUND = (
+    "facebook.com",
+    "twitter.com",
+    "//x.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "pinterest.",
+    "whatsapp.com",
+    "wa.me",
+    "t.me/",
+    "telegram.",
+    "reddit.com",
+    "linkedin.com/share",
+    "google.com/maps",
+    "goo.gl/maps",
+    "doubleclick.net",
+    "googleadservices.com",
+    "googlesyndication.com",
+    "amazon.com/dp/",
+    "amazon.com/gp/",
+    "amzn.to",
+    # ad clicks / sponsored redirects (never an official link)
+    "gclid=",
+    "gad_source=",
+    "gbraid=",
+    "/aclk?",
+    "adurl=",
+    "adservice.",
+    "utm_medium=cpc",
+    "utm_medium=paid",
+    "play.google.com",
+    "apps.apple.com",
+    "wikipedia.org",
+)
+OUTBOUND_HEADING = "## Official & Outbound Application Links"
+_LABEL_SCORES = (
+    (re.compile(r"\b(official (link|website|site|page|portal)|application link)\b", re.I), 10),
+    (
+        re.compile(
+            r"\b(apply (now|online|here|today)|online application|application form"
+            r"|start (your )?application|application portal|apply for this)\b",
+            re.I,
+        ),
+        9,
+    ),
+    (re.compile(r"\bapply\b", re.I), 6),
+    (re.compile(r"\b(program(me)? (website|page)|more (details|information|info))\b", re.I), 2),
+)
+_OFFICIAL_TLD = re.compile(r"\.(edu|gov|mil|int)(\.[a-z]{2})?$|\.ac\.[a-z]{2}$")
+_ENTRY_SUBDOMAIN = re.compile(r"^(apply|admissions?|careers?|jobs|graduate|grad|scholarships?)\.")
+_ENTRY_PATH = re.compile(
+    r"(apply|admission|application|scholarship|fellowship|internship|career|job|program)", re.I
+)
+_LINE = re.compile(
+    r"^- \[(?P<text>[^\]]*)\]\((?P<url>[^)\s]+)\)(?: \(score (?P<score>\d+)\))?", re.M
+)
+MIN_PORTAL_LINK_SCORE = 6
+
+
+def host_of(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
+def is_aggregator_host(host: str, extra: frozenset[str] = frozenset()) -> bool:
+    host = host.lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == d or host.endswith("." + d) for d in AGGREGATOR_DOMAINS | extra)
+
+
+def is_aggregator_url(url: str | None, extra: frozenset[str] = frozenset()) -> bool:
+    return bool(url) and is_aggregator_host(host_of(url or ""), extra)
+
+
+def is_ats_url(url: str) -> bool:
+    low = url.lower()
+    return any(marker in low for marker in ATS_HOST_MARKERS)
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundLink:
+    url: str
+    text: str
+    score: int
+
+
+def score_outbound_link(
+    url: str, text: str, page_url: str, extra: frozenset[str] = frozenset()
+) -> int:
+    """How likely an anchor on `page_url` is the programme's official / application link.
+    0 = not a candidate (same site, social, ads, another aggregator, non-http)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return 0
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return 0
+    host = host_of(url)
+    low = url.lower()
+    if registrable_host(url) == registrable_host(page_url):
+        return 0
+    if is_aggregator_host(host, extra) or any(bad in low for bad in _NOT_OUTBOUND):
+        return 0
+    label = max((w for rx, w in _LABEL_SCORES if rx.search(text or "")), default=0)
+    site = 0
+    if _OFFICIAL_TLD.search(host):
+        site += 4
+    elif host.endswith(".org"):
+        site += 1
+    if is_ats_url(url):
+        site += 5
+    if _ENTRY_SUBDOMAIN.match(host):
+        site += 3
+    if _ENTRY_PATH.search(parts.path):
+        site += 2
+    if label == 0 and site < 4:
+        return 0
+    return label + site
+
+
+def best_outbound_links(
+    anchors: list[tuple[str, str]],
+    page_url: str,
+    extra: frozenset[str] = frozenset(),
+    limit: int = 8,
+) -> list[OutboundLink]:
+    """Rank (url, anchor text) pairs found on a page; one entry per URL (best label wins)."""
+    best: dict[str, OutboundLink] = {}
+    for url, text in anchors:
+        score = score_outbound_link(url, text, page_url, extra)
+        if score <= 0:
+            continue
+        key = url.split("#", 1)[0]
+        if key not in best or best[key].score < score:
+            best[key] = OutboundLink(key, " ".join(text.split())[:120], score)
+    return sorted(best.values(), key=lambda link: -link.score)[:limit]
+
+
+def outbound_markdown(links: list[OutboundLink]) -> str:
+    """The section appended to a distilled page so the extractor sees the exact external URLs
+    (and `parse_outbound_links` can read them back deterministically)."""
+    if not links:
+        return ""
+    rows = [f"- [{link.text or 'link'}]({link.url}) (score {link.score})" for link in links]
+    return OUTBOUND_HEADING + "\n\n" + "\n".join(rows)
+
+
+def parse_outbound_links(markdown: str) -> list[OutboundLink]:
+    start = markdown.find(OUTBOUND_HEADING)
+    if start < 0:
+        return []
+    section = markdown[start + len(OUTBOUND_HEADING) :]
+    end = section.find("\n## ")
+    section = section if end < 0 else section[:end]
+    return [
+        OutboundLink(m.group("url"), m.group("text"), int(m.group("score") or 1))
+        for m in _LINE.finditer(section)
+    ]
+
+
+def resolve_portal_url(
+    portal_url: str | None,
+    page_url: str,
+    links: list[OutboundLink],
+    *,
+    title: str,
+    organization: str | None,
+    siblings: int,
+    extra: frozenset[str] = frozenset(),
+) -> str | None:
+    """The official application URL to use instead of `portal_url`, or None to keep it.
+
+    Replaces a missing portal, the page itself, or any aggregator URL with the best outbound
+    link. On a page describing several opportunities, a link is only used when its text, path or
+    host names this opportunity (title / organization tokens)."""
+    needs = (
+        not portal_url
+        or portal_url.split("#", 1)[0] == page_url.split("#", 1)[0]
+        or is_aggregator_url(portal_url, extra)
+    )
+    if not needs:
+        return None
+    candidates = [link for link in links if link.score >= MIN_PORTAL_LINK_SCORE]
+    if siblings > 1:
+        wanted = title_tokens(title, organization)
+        candidates = [
+            link
+            for link in candidates
+            if wanted
+            & title_tokens(
+                f"{link.text} {urlsplit(link.url).path} {host_of(link.url)}".replace(".", " ")
+            )
+        ]
+    return candidates[0].url if candidates else None
+
+
+# ---- official portal search fallback ---------------------------------------------------------
+
+
+def official_search_query(title: str, organization: str | None) -> str:
+    """One targeted query for the official application page of an opportunity."""
+    org = f' "{organization}"' if organization and organization.lower() not in title.lower() else ""
+    return f'"{title}"{org} official apply'
+
+
+def pick_official_search_hit(
+    hits: list[tuple[str, str]],
+    title: str,
+    organization: str | None,
+    extra: frozenset[str] = frozenset(),
+    exclude_hosts: frozenset[str] = frozenset(),
+) -> str | None:
+    """Best (url, result title) from a web search for an opportunity's official page: never an
+    aggregator / social / ad host, must name the opportunity (title / organization tokens), and
+    official domains, ATS hosts and apply / admissions pages win."""
+    wanted = title_tokens(title, organization)
+    if not wanted:
+        return None
+    need = max(1, round(len(wanted) * 0.3))
+    best: tuple[int, str] | None = None
+    for url, hit_title in hits:
+        host = host_of(url)
+        if not host or host in exclude_hosts or registrable_host(url) in exclude_hosts:
+            continue
+        score = score_outbound_link(url, f"{hit_title} apply", "https://search.invalid/", extra)
+        if score <= 0:
+            continue
+        overlap = len(
+            wanted & title_tokens(f"{hit_title} {urlsplit(url).path} {host}".replace(".", " "))
+        )
+        if overlap < need:
+            continue
+        total = score + 3 * overlap
+        if best is None or total > best[0]:
+            best = (total, url)
+    return best[1] if best else None

@@ -16,10 +16,53 @@ from app.domain.essay.models import (
 )
 from app.domain.memory.models import KnowledgeQA, MemorySource, RecallResult
 from app.domain.profile.documents import Document
-from app.domain.profile.models import DegreeLevel
+from app.domain.profile.models import (
+    MAX_REFEREES,
+    REFEREE_KEYS,
+    DegreeLevel,
+    EnglishProficiency,
+    WorkMode,
+)
 from app.domain.shared.enums import DocKind
 
 # ---- profile ------------------------------------------------------------------------------------
+
+
+class EmergencyContactIn(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=50)
+    relationship: str | None = Field(default=None, max_length=60)
+
+
+class RefereeIn(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    title: str | None = Field(default=None, max_length=120)
+    department: str | None = Field(default=None, max_length=200)
+    organization: str | None = Field(default=None, max_length=200)
+    email: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=50)
+    relationship: str | None = Field(default=None, max_length=120)
+
+
+class ProfileDetailsIn(BaseModel):
+    current_semester_or_year: str | None = Field(default=None, max_length=60)
+    cgpa_percentage: float | None = Field(default=None, ge=0, le=100)
+    secondary_school_qualification: str | None = Field(default=None, max_length=200)
+    secondary_school_percentage: float | None = Field(default=None, ge=0, le=100)
+    minor_or_specialization: str | None = Field(default=None, max_length=200)
+    thesis_or_fyp_title: str | None = Field(default=None, max_length=300)
+    academic_honors: list[str] = Field(default_factory=list, max_length=30)
+    english_proficiency_type: EnglishProficiency | None = None
+    english_proficiency_score: str | None = Field(default=None, max_length=20)
+    standardized_tests: dict[str, str] = Field(default_factory=dict, max_length=12)
+    publications_count: int | None = Field(default=None, ge=0, le=1000)
+    research_interests: list[str] = Field(default_factory=list, max_length=30)
+    preferred_work_mode: WorkMode | None = None
+    earliest_start_date: str | None = Field(default=None, max_length=10)
+    requires_visa_sponsorship: bool | None = None
+    has_valid_passport: bool | None = None
+    financial_need_eligible: bool | None = None
+    first_generation_student: bool | None = None
 
 
 class PIIIn(BaseModel):
@@ -28,6 +71,45 @@ class PIIIn(BaseModel):
     date_of_birth: str | None = Field(default=None, max_length=20)
     national_id: str | None = Field(default=None, max_length=100)
     passport_number: str | None = Field(default=None, max_length=100)
+    city: str | None = Field(default=None, max_length=120)
+    state_or_province: str | None = Field(default=None, max_length=120)
+    postal_code: str | None = Field(default=None, max_length=20)
+    gender: str | None = Field(default=None, max_length=40)
+    marital_status: str | None = Field(default=None, max_length=40)
+    linkedin_url: str | None = Field(default=None, max_length=300)
+    github_url: str | None = Field(default=None, max_length=300)
+    portfolio_url: str | None = Field(default=None, max_length=300)
+    orcid_or_scholar_url: str | None = Field(default=None, max_length=300)
+    emergency_contact: EmergencyContactIn | None = None
+    referees: list[RefereeIn] = Field(default_factory=list, max_length=MAX_REFEREES)
+
+    def flat(self) -> dict[str, str | None]:
+        """The encrypted PII document is flat: referee_1_email, emergency_contact_phone..."""
+        data: dict[str, str | None] = self.model_dump(exclude={"emergency_contact", "referees"})
+        if self.emergency_contact is not None:
+            for k, v in self.emergency_contact.model_dump().items():
+                data[f"emergency_contact_{k}"] = v
+        for i, ref in enumerate(self.referees[:MAX_REFEREES], start=1):
+            for k, v in ref.model_dump().items():
+                data[f"referee_{i}_{k}"] = v
+        return data
+
+    @staticmethod
+    def of(flat: dict[str, str | None]) -> PIIIn:
+        base = {k: v for k, v in flat.items() if not k.startswith(("referee_", "emergency_"))}
+        emergency = {
+            k: flat.get(f"emergency_contact_{k}") for k in ("name", "phone", "relationship")
+        }
+        referees = []
+        for i in range(1, MAX_REFEREES + 1):
+            ref = {k: flat.get(f"referee_{i}_{k}") for k in REFEREE_KEYS}
+            if any(ref.values()):
+                referees.append(RefereeIn(**ref))
+        return PIIIn(
+            **base,
+            emergency_contact=EmergencyContactIn(**emergency) if any(emergency.values()) else None,
+            referees=referees,
+        )
 
 
 class LanguageIn(BaseModel):
@@ -57,6 +139,7 @@ class ProfileIn(BaseModel):
     skills: list[str] = Field(default_factory=list, max_length=100)
     languages: list[LanguageIn] = Field(default_factory=list, max_length=30)
     experiences: list[ExperienceIn] = Field(default_factory=list, max_length=50)
+    details: ProfileDetailsIn = Field(default_factory=ProfileDetailsIn)
 
 
 class ProfileOut(ProfileIn):
@@ -72,7 +155,8 @@ class ProfileOut(ProfileIn):
         return ProfileOut(
             id=p.id,
             full_name=p.full_name,
-            pii=PIIIn(**p.pii.to_dict()),
+            pii=PIIIn.of(p.pii.to_dict()),
+            details=ProfileDetailsIn(**p.details.to_dict()),
             degree_level=p.degree_level,
             major=p.major,
             institution=p.institution,

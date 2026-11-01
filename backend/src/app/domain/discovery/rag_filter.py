@@ -19,6 +19,8 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.domain.discovery.listing import OUTBOUND_HEADING
+
 INTENT_TERMS = (
     "scholarship",
     "fellowship",
@@ -331,6 +333,9 @@ def select_sections(
             keep[s.section.index] = s
             used += s.section.chars
 
+    for s in scored:  # the distiller's official / outbound application links: always kept
+        if s.section.text.lstrip().startswith(OUTBOUND_HEADING):
+            add(s, max_chars)
     lead = scored[0]
     if lead.score / best >= MIN_SECTION_SCORE:
         add(lead, max_chars)

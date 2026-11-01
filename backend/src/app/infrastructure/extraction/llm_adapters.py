@@ -97,6 +97,7 @@ def split_windows(text: str, chunk_chars: int, overlap: int) -> list[str]:
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I)
     cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text.strip(), flags=re.I)
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end <= start:
@@ -123,6 +124,31 @@ class EligibilityModel(_Model):
     graduation_year_min: int | None = Field(default=None, ge=1950, le=2100)
     graduation_year_max: int | None = Field(default=None, ge=1950, le=2100)
     other_criteria: list[str] = Field(default_factory=list)
+    english_tests: dict[str, float] = Field(default_factory=dict)
+    moi_accepted: bool | None = None
+    visa_sponsorship: bool | None = None
+    requires_passport: bool | None = None
+    financial_need_required: bool | None = None
+    research_areas: list[str] = Field(default_factory=list)
+    work_mode: str | None = None
+
+    @field_validator("english_tests", mode="before")
+    @classmethod
+    def _tests(cls, v: Any) -> dict[str, float]:
+        if not isinstance(v, dict):
+            return {}
+        out: dict[str, float] = {}
+        for k, x in v.items():
+            try:
+                out[str(k).upper()[:20]] = float(x)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    @field_validator("research_areas", mode="before")
+    @classmethod
+    def _areas(cls, v: Any) -> list[str]:
+        return [str(x)[:120] for x in (v or [])][:20]
 
     @field_validator("nationalities", "residency_countries", "other_criteria", mode="before")
     @classmethod
@@ -246,6 +272,13 @@ def to_extract(m: OpportunityModel) -> OpportunityExtract:
                 "graduation_year_min": e.graduation_year_min,
                 "graduation_year_max": e.graduation_year_max,
                 "other_criteria": [c[:300] for c in e.other_criteria],
+                "english_tests": e.english_tests,
+                "moi_accepted": e.moi_accepted,
+                "visa_sponsorship": e.visa_sponsorship,
+                "requires_passport": e.requires_passport,
+                "financial_need_required": e.financial_need_required,
+                "research_areas": e.research_areas,
+                "work_mode": e.work_mode,
             }
         ),
         ai_policy=_enum(AiPolicy, m.ai_policy, AiPolicy.UNKNOWN),
@@ -272,7 +305,11 @@ Return ONLY one compact JSON object, no prose, no markdown fences:
     "min_gpa": number|null, "gpa_scale": number|null,
     "nationalities": [str], "residency_countries": [str],
     "graduation_year_min": int|null, "graduation_year_max": int|null,
-    "other_criteria": [str]},
+    "other_criteria": [str],
+    "english_tests": {"IELTS"|"TOEFL"|"DUOLINGO"|"PTE": number}, "moi_accepted": bool|null,
+    "visa_sponsorship": bool|null, "requires_passport": bool|null,
+    "financial_need_required": bool|null, "research_areas": [str],
+    "work_mode": "REMOTE"|"HYBRID"|"ONSITE"|null},
   "ai_policy": "ALLOWED"|"PROHIBITED"|"UNKNOWN"}]}
 
 Rules:

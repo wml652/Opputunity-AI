@@ -85,6 +85,17 @@ export const opportunitySchema = z.object({
   ai_policy: z.string(),
   latest_outcome: outcomeEnum.nullable(),
   created_at: z.string(),
+  match_score: z.number().int().nullable().optional(),
+  rank_breakdown: z
+    .object({
+      eligibility: z.number(),
+      alignment: z.number(),
+      portal: z.number(),
+      urgency: z.number(),
+      reasons: z.array(z.string()),
+    })
+    .nullable()
+    .optional(),
 });
 export type OpportunityT = z.infer<typeof opportunitySchema>;
 
@@ -108,6 +119,8 @@ export const queueItemSchema = z.object({
   priority_rank: z.number().nullable(),
   deadline_at: z.string().nullable(),
   opportunity: opportunitySchema,
+  match_score: z.number().int().nullable().optional(),
+  last_error: z.string().nullable().optional(),
 });
 export type QueueItem = z.infer<typeof queueItemSchema>;
 

@@ -9,7 +9,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.container import ApiContainer
 from app.api.errors import install_error_handlers
 from app.api.middleware.security import CsrfMiddleware, RequestContextMiddleware
-from app.api.v1 import applications, auth, discovery, events, llm, sessions, system, vault
+from app.api.v1 import (
+    applications,
+    auth,
+    discovery,
+    events,
+    llm,
+    sessions,
+    system,
+    training,
+    vault,
+)
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
@@ -27,7 +37,7 @@ def build_api(container: ApiContainer, lifespan: Lifespan | None = None) -> Fast
     app.state.container = container
 
     v1 = APIRouter(prefix="/api/v1")
-    for module in (auth, llm, events, system, vault, discovery, applications, sessions):
+    for module in (auth, llm, events, system, vault, discovery, applications, sessions, training):
         v1.include_router(module.router)
     app.include_router(v1)
 

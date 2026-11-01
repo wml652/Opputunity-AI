@@ -56,6 +56,26 @@ def _error_detail(response: httpx.Response) -> str:
     return str(body)
 
 
+def _hint(status: int, detail: str) -> str:
+    """What to do about common NVIDIA NIM / OpenRouter errors."""
+    low = detail.lower()
+    if status in (404, 410) and ("function" in low or "not found for account" in low):
+        return (
+            " - this model is in the catalog but not enabled for your key/account; pick another "
+            "one from 'Load models' or enable it on build.nvidia.com"
+        )
+    if status in (404, 410):
+        return " - unknown or retired model id; reload the catalog and pick a listed model"
+    if status == 422:
+        return (
+            " - the endpoint rejected the request (wrong model type for chat, e.g. an embedding, "
+            "reward or rerank model, or an unsupported parameter)"
+        )
+    if status == 429:
+        return " - rate limited; lower 'Requests per minute' on the provider"
+    return ""
+
+
 def _retry_after_seconds(response: httpx.Response) -> float | None:
     raw = response.headers.get("retry-after")
     if raw is None:
@@ -131,9 +151,10 @@ class OpenAICompatibleClient:
                             response.status_code,
                         )
                     return payload
-                message = redact_text(f"HTTP {response.status_code}: {_error_detail(response)}")[
-                    :_MAX_ERROR_CHARS
-                ]
+                detail = _error_detail(response)
+                message = redact_text(
+                    f"HTTP {response.status_code}: {detail}{_hint(response.status_code, detail)}"
+                )[:_MAX_ERROR_CHARS]
                 error = LLMHttpError(
                     _code_for_status(response.status_code), message, response.status_code
                 )

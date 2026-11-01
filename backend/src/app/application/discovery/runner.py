@@ -39,6 +39,8 @@ from app.domain.discovery.listing import (
     detail_link_score,
     has_distinct_identifiers,
     is_near_duplicate,
+    parse_outbound_links,
+    resolve_portal_url,
 )
 from app.domain.discovery.models import (
     DEDUPE_SIMILARITY,
@@ -88,6 +90,7 @@ from app.domain.discovery.rag_filter import (
     select_sections,
     split_sections,
 )
+from app.domain.discovery.ranking import rank_opportunity
 from app.domain.discovery.sessions import (
     BROWSER_SESSION_AAD,
     SEARCH_CREDENTIAL_AAD,
@@ -142,7 +145,9 @@ VISION_INSTRUCTION = (
 MIN_FOLLOWABLE_CARDS = 3  # a listing with fewer followable cards is extracted directly
 KNOWN_TITLES_LIMIT = 2_000
 CANCEL_POLL_S = 0.5
-PROGRESS_INTERVAL_S = 1.5  # campaign.progress events at most this often (plus every phase change)
+PROGRESS_INTERVAL_S = 1.5
+# Streaming auto-apply only starts applications that are also a good match (0-100).
+STREAM_MIN_SCORE = 50
 QUEUE_SIZE = 64
 
 _LOGIN_WALL = re.compile(
@@ -172,6 +177,7 @@ class CampaignRun:
         self.counters = {**empty_counters(), **campaign.counters}
         self.phase_value = campaign.phase.value
         self.progress_at = 0.0
+        self.streamed: list[uuid.UUID] = []  # applications auto-started while crawling
         self.playbooks: dict[str, DomainPlaybook] = {}
         self.dirty: set[str] = set()
         self.pb_lock = asyncio.Lock()
@@ -456,7 +462,7 @@ class CampaignRun:
 
         try:
             states = await self.deps.auto_stage(
-                self.user, self.c.id, self.c.settings.auto_stage_limit, progress
+                self.user, self.c.id, self.c.settings.auto_stage_limit, progress, self.streamed
             )
         except DomainError as exc:
             self.log("auto_stage_failed", error=exc.message)
@@ -1382,7 +1388,7 @@ class CampaignRun:
             self._touch(pb)
         found: list[Opportunity] = []
         for extract in result.extracts:
-            opp = await self._persist_opportunity(extract, page)
+            opp = await self._persist_opportunity(extract, page, len(result.extracts))
             if opp is not None:
                 found.append(opp)
         page.status, page.error, page.error_stage, page.error_code, page.error_detail = (
@@ -1396,13 +1402,26 @@ class CampaignRun:
         return found
 
     async def _persist_opportunity(
-        self, ex: OpportunityExtract, page: CrawledPage
+        self, ex: OpportunityExtract, page: CrawledPage, siblings: int = 1
     ) -> Opportunity | None:
         assert self.embedder is not None
         base = page.final_url or page.url
         portal = urljoin(base, ex.portal_url) if ex.portal_url else base
         if urlsplit(portal).scheme not in ("http", "https"):
             portal = base
+        # Aggregator / blog page or no portal: use the official outbound link from the page.
+        official = resolve_portal_url(
+            portal,
+            base,
+            parse_outbound_links(page.markdown or ""),
+            title=ex.title,
+            organization=ex.organization,
+            siblings=siblings,
+            extra=self.deps.aggregator_domains,
+        )
+        if official is not None:
+            self.log("portal_resolved", title=ex.title, aggregator=portal, official=official)
+            portal = official
         # The page URL is only a fallback portal (many items share it), never evidence that two
         # items are the same opportunity.
         candidate = DedupeCandidate(ex.title, ex.organization, portal if portal != base else None)
@@ -1581,6 +1600,40 @@ class CampaignRun:
                 )
                 await uow.commit()
             self.log("queued", title=opp.title, deadline=str(opp.deadline_at))
+            await self._stream_apply(app, opp)
+
+    async def _stream_apply(self, app: Application, opp: Opportunity) -> None:
+        """Streaming auto-apply: fill an eligible, relevant application right away - while the
+        crawl continues - so stopping a campaign early still leaves staged applications. Never
+        submits; the application runner bounds how many browsers run at once."""
+        start = self.deps.start_application
+        if (
+            start is None
+            or not self.c.settings.auto_stage
+            or not opp.portal_url
+            or len(self.streamed) >= self.c.settings.auto_stage_limit
+        ):
+            return
+        # Only eligible opportunities are queued; the loaded object may predate its verdict.
+        eligible = replace(opp, latest_outcome=EligibilityOutcome.ELIGIBLE)
+        rank = rank_opportunity(
+            eligible, self.profile, self.deps.clock.now(), self.deps.aggregator_domains
+        )
+        if rank.score < STREAM_MIN_SCORE:
+            self.log("stream_skipped", title=opp.title, match_score=rank.score)
+            return
+        try:
+            await start(self.user, app.id)
+        except DomainError as exc:
+            self.log("stream_failed", title=opp.title, error=exc.message)
+            return
+        self.streamed.append(app.id)
+        self.counters[STAGE_TARGET] = len(self.streamed)
+        self.log("stream_started", title=opp.title, match_score=rank.score)
+        await self._event(
+            "application.auto_started",
+            {"application_id": str(app.id), "title": opp.title, "match_score": rank.score},
+        )
 
     # -- M6: in-page RAG, PDF documents, vision parsing -----------------------------------------
 

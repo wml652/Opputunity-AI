@@ -7,6 +7,8 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.application.agent.teach import TeachAgentSession
+from app.application.applications.live import GetLiveFrame
 from app.application.applications.submission import (
     ApproveSubmission,
     GetReceiptScreenshot,
@@ -30,6 +32,7 @@ from app.application.auth.use_cases import (
     RefreshSession,
     RegisterUser,
 )
+from app.application.discovery.portal_repair import RepairAggregatorPortals
 from app.application.discovery.sessions import (
     CaptureBrowserSession,
     DeleteBrowserSession,
@@ -96,6 +99,11 @@ from app.application.profile.use_cases import (
     UploadDocument,
 )
 from app.application.system.use_cases import GetWorkerStatus
+from app.application.training.service import (
+    BackfillTrajectories,
+    ExportTrainingData,
+    GetTrainingOverview,
+)
 from app.domain.ports.discovery import ICampaignRunner
 from app.domain.ports.events import IEventBus
 from app.domain.ports.security import IAccessTokenService
@@ -149,6 +157,7 @@ class DiscoveryUseCases:
     get_page: GetPage
     log_path: Callable[[uuid.UUID], str]
     spawn: Callable[[Coroutine[Any, Any, None]], None]
+    repair_portals: RepairAggregatorPortals
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +187,16 @@ class ApplicationUseCases:
     reject: RejectApplication
     receipt: GetReceiptScreenshot
     unblock: UnblockApplication
+    live_frame: GetLiveFrame
+    teach: TeachAgentSession
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingUseCases:
+    overview: GetTrainingOverview
+    backfill: BackfillTrajectories
+    export: ExportTrainingData
+    kit: Callable[[str], tuple[str, bytes] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,3 +242,4 @@ class ApiContainer:
     applications: ApplicationUseCases
     notifications: NotificationUseCases
     sessions: SessionUseCases
+    training: TrainingUseCases

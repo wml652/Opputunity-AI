@@ -80,13 +80,14 @@ export function useCancelCampaign() {
   });
 }
 
-export function useOpportunities(outcome: Outcome | "ALL") {
+export function useOpportunities(outcome: Outcome | "ALL", sort = "deadline", order = "asc") {
   return useQuery({
-    queryKey: discoveryKeys.opportunities(outcome),
-    queryFn: () =>
-      api(`/api/v1/opportunities${outcome === "ALL" ? "" : `?outcome=${outcome}`}`, {
-        schema: z.array(opportunitySchema),
-      }),
+    queryKey: [...discoveryKeys.opportunities(outcome), sort, order],
+    queryFn: () => {
+      const params = new URLSearchParams({ sort, order });
+      if (outcome !== "ALL") params.set("outcome", outcome);
+      return api(`/api/v1/opportunities?${params.toString()}`, { schema: z.array(opportunitySchema) });
+    },
   });
 }
 
@@ -98,9 +99,10 @@ export function useOpportunity(id: string | null) {
   });
 }
 
-export function useQueue() {
+export function useQueue(sort = "match", order = "desc") {
   return useQuery({
-    queryKey: discoveryKeys.queue,
-    queryFn: () => api("/api/v1/applications/queue", { schema: z.array(queueItemSchema) }),
+    queryKey: [...discoveryKeys.queue, sort, order],
+    queryFn: () =>
+      api(`/api/v1/applications/queue?sort=${sort}&order=${order}`, { schema: z.array(queueItemSchema) }),
   });
 }

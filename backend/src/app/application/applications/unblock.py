@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 from app.application.applications.use_cases import StartFilling
 from app.application.discovery.sessions import CaptureBrowserSession
+from app.domain.applications.filling import PortalGate
+from app.domain.discovery.listing import is_aggregator_url
 from app.domain.discovery.sessions import SessionKind
 from app.domain.ports.uow import IUnitOfWorkFactory
 from app.domain.shared.enums import ApplicationState
@@ -34,6 +36,7 @@ class UnblockApplication:
     async def execute(self, user_id: uuid.UUID, application_id: uuid.UUID) -> UnblockStarted:
         async with self.uow_factory(user_id) as uow:
             found = await uow.app_details.get(user_id, application_id)
+            checkpoint = await uow.checkpoints.latest(user_id, application_id)
         if found is None:
             raise NotFoundError("application not found")
         app, opp = found
@@ -45,7 +48,16 @@ class UnblockApplication:
         async def resume() -> None:
             await self.resume.execute(user_id, application_id)
 
-        domain = await self.capture.execute(
-            user_id, opp.portal_url, SessionKind.PORTAL, on_captured=resume
-        )
-        return UnblockStarted(application_id, domain, opp.portal_url)
+        # A sign-in wall found by the pathfinder: open its sign-in page (the checkpoint URL), not
+        # the overview / aggregator page the portal URL points at.
+        url = opp.portal_url
+        if (
+            checkpoint is not None
+            and (app.last_error or "").startswith(
+                (f"[{PortalGate.LOGIN.value}]", f"[{PortalGate.CHALLENGE.value}]")
+            )
+            and not is_aggregator_url(checkpoint.checkpoint.url)
+        ):
+            url = checkpoint.checkpoint.url
+        domain = await self.capture.execute(user_id, url, SessionKind.PORTAL, on_captured=resume)
+        return UnblockStarted(application_id, domain, url)

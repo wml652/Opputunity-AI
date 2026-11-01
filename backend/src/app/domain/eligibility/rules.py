@@ -57,6 +57,14 @@ class EligibilityRules:
     graduation_year_min: int | None = None
     graduation_year_max: int | None = None
     other_criteria: list[str] = field(default_factory=list)
+    # Profile v2 criteria. None / empty = not stated.
+    english_tests: dict[str, float] = field(default_factory=dict)  # {"IELTS": 6.5}
+    moi_accepted: bool | None = None  # an English-medium degree waives the test
+    visa_sponsorship: bool | None = None  # False = "no visa sponsorship"
+    requires_passport: bool | None = None
+    financial_need_required: bool | None = None
+    research_areas: list[str] = field(default_factory=list)  # ranking signal
+    work_mode: str | None = None  # REMOTE | HYBRID | ONSITE (ranking signal)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +76,13 @@ class EligibilityRules:
             "graduation_year_min": self.graduation_year_min,
             "graduation_year_max": self.graduation_year_max,
             "other_criteria": self.other_criteria,
+            "english_tests": self.english_tests,
+            "moi_accepted": self.moi_accepted,
+            "visa_sponsorship": self.visa_sponsorship,
+            "requires_passport": self.requires_passport,
+            "financial_need_required": self.financial_need_required,
+            "research_areas": self.research_areas,
+            "work_mode": self.work_mode,
         }
 
     @staticmethod
@@ -97,7 +112,42 @@ class EligibilityRules:
             graduation_year_min=_int(data.get("graduation_year_min")),
             graduation_year_max=_int(data.get("graduation_year_max")),
             other_criteria=[str(x) for x in data.get("other_criteria") or [] if str(x).strip()],
+            english_tests=_english_tests(data.get("english_tests")),
+            moi_accepted=_bool(data.get("moi_accepted")),
+            visa_sponsorship=_bool(data.get("visa_sponsorship")),
+            requires_passport=_bool(data.get("requires_passport")),
+            financial_need_required=_bool(data.get("financial_need_required")),
+            research_areas=[
+                str(x)[:120] for x in data.get("research_areas") or [] if str(x).strip()
+            ][:20],
+            work_mode=(
+                str(data["work_mode"]).upper()
+                if str(data.get("work_mode") or "").upper() in ("REMOTE", "HYBRID", "ONSITE")
+                else None
+            ),
         )
+
+
+ENGLISH_TESTS = ("IELTS", "TOEFL", "DUOLINGO", "PTE")
+
+
+def _bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _english_tests(value: Any) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not isinstance(value, dict):
+        return out
+    for k, v in value.items():
+        test = str(k).strip().upper()
+        try:
+            score = float(v)
+        except (TypeError, ValueError):
+            continue
+        if test in ENGLISH_TESTS and 0 < score <= 200:
+            out[test] = score
+    return out
 
 
 def _int(value: Any) -> int | None:
@@ -230,12 +280,68 @@ def evaluate_graduation(rules: EligibilityRules, profile: StudentProfile) -> Rul
     )
 
 
+def evaluate_english(rules: EligibilityRules, profile: StudentProfile) -> RuleResult:
+    """IELTS / TOEFL / Duolingo / PTE minimums; native speakers pass; an English-medium degree
+    (MOI) passes only where the listing accepts MOI."""
+    if not rules.english_tests and rules.moi_accepted is None:
+        return RuleResult("english", RuleStatus.PASS, "no English requirement stated")
+    wanted = ", ".join(f"{t} {s:g}" for t, s in rules.english_tests.items()) or "English proof"
+    d = profile.details
+    kind = d.english_proficiency_type.value if d.english_proficiency_type else None
+    if kind == "NATIVE":
+        return RuleResult("english", RuleStatus.PASS, f"native speaker; required {wanted}")
+    if kind == "MOI_EXEMPT":
+        if rules.moi_accepted:
+            return RuleResult("english", RuleStatus.PASS, "English-medium degree (MOI) accepted")
+        if rules.moi_accepted is False:
+            return RuleResult("english", RuleStatus.FAIL, f"MOI not accepted; requires {wanted}")
+        return RuleResult("english", RuleStatus.UNKNOWN, f"MOI not mentioned; requires {wanted}")
+    if kind in rules.english_tests:
+        try:
+            score = float(str(d.english_proficiency_score or "").strip())
+        except ValueError:
+            return RuleResult("english", RuleStatus.UNKNOWN, f"{kind} score missing; {wanted}")
+        need = rules.english_tests[kind]
+        return RuleResult(
+            "english",
+            RuleStatus.PASS if score >= need else RuleStatus.FAIL,
+            f"{kind} {score:g} vs required {need:g}",
+        )
+    if kind in (None, "NONE"):
+        return RuleResult("english", RuleStatus.UNKNOWN, f"no English test in profile; {wanted}")
+    return RuleResult("english", RuleStatus.UNKNOWN, f"profile has {kind}; listing asks {wanted}")
+
+
+def _flag_rule(
+    rule: str, required: bool | None, student: bool | None, need: str, fail: str
+) -> RuleResult:
+    if not required:
+        return RuleResult(rule, RuleStatus.PASS, "not required")
+    if student is None:
+        return RuleResult(rule, RuleStatus.UNKNOWN, f"{need} - profile does not say")
+    return RuleResult(
+        rule, RuleStatus.PASS if student else RuleStatus.FAIL, need if student else fail
+    )
+
+
+def evaluate_visa(rules: EligibilityRules, profile: StudentProfile) -> RuleResult:
+    needs = profile.details.requires_visa_sponsorship
+    if rules.visa_sponsorship is not False:
+        return RuleResult("visa", RuleStatus.PASS, "sponsorship not excluded")
+    if needs is None:
+        return RuleResult("visa", RuleStatus.UNKNOWN, "no visa sponsorship; profile does not say")
+    if needs:
+        return RuleResult("visa", RuleStatus.FAIL, "no visa sponsorship, student needs one")
+    return RuleResult("visa", RuleStatus.PASS, "no sponsorship needed")
+
+
 def evaluate_deterministic(
     rules: EligibilityRules,
     profile: StudentProfile,
     deadline_at: datetime | None,
     now: datetime,
 ) -> list[RuleResult]:
+    d = profile.details
     return [
         evaluate_deadline(deadline_at, now),
         evaluate_degree(rules, profile),
@@ -243,6 +349,22 @@ def evaluate_deterministic(
         _country_rule("nationality", rules.nationalities, profile.nationality),
         _country_rule("residency", rules.residency_countries, profile.country_of_residence),
         evaluate_graduation(rules, profile),
+        evaluate_english(rules, profile),
+        evaluate_visa(rules, profile),
+        _flag_rule(
+            "passport",
+            rules.requires_passport,
+            d.has_valid_passport,
+            "valid passport",
+            "a valid passport is required",
+        ),
+        _flag_rule(
+            "financial_need",
+            rules.financial_need_required,
+            d.financial_need_eligible,
+            "demonstrated financial need",
+            "for students with financial need only",
+        ),
     ]
 
 
@@ -275,4 +397,6 @@ def profile_snapshot(profile: StudentProfile) -> dict[str, Any]:
             f"{e.description[:200]}"
             for e in profile.experiences[:10]
         ],
+        # Profile v2 (non-PII only: links, city and referees stay encrypted and out of prompts).
+        **{k: v for k, v in profile.details.to_dict().items() if v not in (None, [], {}, "")},
     }

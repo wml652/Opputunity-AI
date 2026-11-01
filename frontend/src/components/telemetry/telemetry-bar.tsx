@@ -9,6 +9,7 @@ import { useEventStream } from "@/lib/event-stream";
 import { useInboxSummary, useLogout, useMe, useWorkers } from "@/lib/queries";
 
 import { ConnectionBadge } from "./connection-badge";
+import { QuickModel } from "./quick-model";
 import { ProviderSelect } from "./provider-select";
 
 function Divider() {
@@ -44,6 +45,7 @@ export function TelemetryBar() {
       <Divider />
       <ProviderSelect />
       <ConnectionBadge />
+      <QuickModel />
       <div className="ml-auto flex items-center gap-3">
         <Metric
           label="Workers"

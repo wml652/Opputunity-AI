@@ -4,6 +4,7 @@ import uuid
 from types import TracebackType
 from typing import Protocol, Self
 
+from app.domain.ports.agent import IAgentWorkflowRepository
 from app.domain.ports.applications import (
     IApplicationDetailRepository,
     IChannelRepository,
@@ -32,6 +33,7 @@ from app.domain.ports.repositories import (
     IRefreshTokenRepository,
     IUserRepository,
 )
+from app.domain.ports.training import ITrajectoryRepository
 from app.domain.ports.vault import (
     IDocumentChunkRepository,
     IDocumentRepository,
@@ -107,6 +109,12 @@ class IUnitOfWork(Protocol):
 
     @property
     def document_chunks(self) -> IDocumentChunkRepository: ...
+
+    @property
+    def agent_workflows(self) -> IAgentWorkflowRepository: ...
+
+    @property
+    def trajectories(self) -> ITrajectoryRepository: ...
 
     @property
     def app_details(self) -> IApplicationDetailRepository: ...

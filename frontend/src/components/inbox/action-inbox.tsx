@@ -9,6 +9,8 @@ import { Input, Textarea } from "@/components/ui/field";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill } from "@/components/ui/status";
 import { cn, formatRelative } from "@/lib/cn";
+import { BlockedReason, parseBlockedReason } from "@/components/applications/blocked-reason";
+import { TeachButton } from "@/components/applications/teach-button";
 import { UnblockButton } from "@/components/applications/unblock-button";
 import { useAnswerQuestion, useInbox, useStartFilling } from "@/lib/m4-queries";
 import type { InboxAppT, InboxQuestionT } from "@/lib/m4-schemas";
@@ -180,6 +182,7 @@ function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked
                 <td className={cn(td, "py-1")}>
                   <div className="truncate text-xs font-medium">{o.title}</div>
                   <div className="truncate font-mono text-[10px] text-faint">{o.organization ?? o.portal_url}</div>
+                  {kind === "blocked" ? <BlockedReason reason={a.last_error} className="mt-0.5 line-clamp-2" /> : null}
                 </td>
                 <td className={td}>
                   <StatusPill tone={kind === "ready" ? "ok" : "err"}>{a.state}</StatusPill>
@@ -189,7 +192,10 @@ function AppList({ items, kind }: { items: InboxAppT[]; kind: "ready" | "blocked
                   <div className="flex justify-end gap-1">
                     {kind === "blocked" ? (
                       <>
-                        <UnblockButton applicationId={a.id} />
+                        {["PORTAL_LOGIN_OR_REGISTER_REQUIRED", "BOT_CHALLENGE_NEEDS_HUMAN", null].includes(parseBlockedReason(a.last_error).gate) ? (
+                          <UnblockButton applicationId={a.id} />
+                        ) : null}
+                        <TeachButton applicationId={a.id} />
                         <Button size="sm" onClick={() => start.mutate(a.id)} disabled={start.isPending}>Retry</Button>
                       </>
                     ) : null}

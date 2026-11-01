@@ -28,7 +28,7 @@ from app.api.v1.vault_schemas import (
 from app.application.essay.use_cases import EssayInput
 from app.application.profile.use_cases import ProfileInput
 from app.domain.profile.documents import MAX_DOCUMENT_BYTES, FileTooLargeError
-from app.domain.profile.models import Experience, Language, StudentPII
+from app.domain.profile.models import Experience, Language, ProfileDetails, StudentPII
 from app.domain.shared.enums import DocKind
 from app.domain.shared.errors import NotFoundError
 
@@ -53,7 +53,7 @@ async def save_profile(body: ProfileIn, user_id: CurrentUserId, container: Conta
         user_id,
         ProfileInput(
             full_name=body.full_name,
-            pii=StudentPII(**body.pii.model_dump()),
+            pii=StudentPII.from_dict(body.pii.flat()),
             degree_level=body.degree_level,
             major=body.major,
             institution=body.institution,
@@ -65,6 +65,7 @@ async def save_profile(body: ProfileIn, user_id: CurrentUserId, container: Conta
             skills=body.skills,
             languages=[Language(name=lang.name, level=lang.level) for lang in body.languages],
             experiences=[Experience(**e.model_dump()) for e in body.experiences],
+            details=ProfileDetails.from_dict(body.details.model_dump(mode="json")),
         ),
     )
     return ProfileOut.of(view)

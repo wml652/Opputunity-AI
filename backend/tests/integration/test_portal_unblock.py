@@ -33,7 +33,7 @@ class PortalLoginCapturer:
     def __init__(self) -> None:
         self.urls: list[str] = []
 
-    async def capture(self, url: str, *, timeout_s: float) -> str:
+    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
         self.urls.append(url)
         cookie = {
             "name": "portal_auth",
@@ -90,7 +90,7 @@ async def test_sign_in_in_browser_unblocks_and_resumes_with_saved_cookies(
     assert (await user.post(f"/api/v1/applications/{app_id}/start")).status_code == 202
     blocked = await _wait(user, app_id)
     assert blocked["application"]["state"] == "BLOCKED_NEEDS_HUMAN", blocked["transitions"]
-    assert "sign in" in blocked["transitions"][-1]["reason"]
+    assert blocked["transitions"][-1]["reason"].startswith("[PORTAL_LOGIN_OR_REGISTER_REQUIRED]")
     assert blocked["questions"] == []  # never asks the student for a password
     assert all(f["field_type"] != "password" for f in blocked["fields"])
     inbox = (await user.get("/api/v1/inbox")).json()

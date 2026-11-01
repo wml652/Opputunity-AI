@@ -124,6 +124,8 @@ export interface ProviderInput {
 /** Optional per-provider slots editable after creation. "" clears a slot (back to the local
  * fallback); a model id is only ever what the user typed. */
 export interface ProviderSlotsPatch {
+  model?: string;
+  embedding_model?: string;
   extraction_model?: string;
   rerank_model?: string;
   rerank_base_url?: string;

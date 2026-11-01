@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
+from app.application.applications.live import live_observer
 from app.application.applications.portal_sessions import (
     combine_with_checkpoint,
     saved_portal_state,
@@ -28,6 +29,7 @@ from app.application.applications.use_cases import (
     _field_aad,
     _transition,
 )
+from app.domain.agent.models import TeachStep, detect_ats, workflow_domain
 from app.domain.applications.filling import (
     ApplicationField,
     Checkpoint,
@@ -294,6 +296,13 @@ class RunSubmission:
 
     deps: ApplicationDeps
 
+    async def _learned_path(self, user_id: uuid.UUID, portal_url: str) -> list[TeachStep]:
+        async with self.deps.uow_factory(user_id) as uow:
+            workflow = await uow.agent_workflows.find(
+                user_id, workflow_domain(portal_url), detect_ats(portal_url)
+            )
+        return workflow.navigation_steps if workflow else []
+
     async def execute(
         self, user_id: uuid.UUID, application_id: uuid.UUID
     ) -> SubmitOutcomeKind | None:
@@ -342,6 +351,7 @@ class RunSubmission:
                 self.deps.clock.now(),
                 user_id,
                 opp.portal_url,
+                *([checkpoint.checkpoint.url] if checkpoint is not None else []),
             )
             storage_state = session_state
             if checkpoint is not None:
@@ -377,6 +387,16 @@ class RunSubmission:
                     approved_hash=approved_hash,
                     storage_state=storage_state,
                     documents=blobs,
+                    observer=live_observer(
+                        self.deps.uow_factory,
+                        self.deps.live_frames,
+                        self.deps.clock,
+                        user_id,
+                        application_id,
+                        opp.title,
+                        "SUBMITTING",
+                    ),
+                    learned_path=await self._learned_path(user_id, opp.portal_url),
                 )
             except Exception as exc:  # noqa: BLE001 - recorded, never retried automatically
                 outcome = SubmitOutcome(

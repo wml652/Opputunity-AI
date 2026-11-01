@@ -17,6 +17,8 @@ import {
   type DocKind,
   type Experience,
   type LanguageEntry,
+  type PII,
+  type ProfileDetails,
 } from "./schemas";
 
 export const vaultKeys = {
@@ -46,13 +48,7 @@ export function useProfile() {
 
 export interface ProfileInput {
   full_name: string;
-  pii: {
-    home_address: string | null;
-    phone: string | null;
-    date_of_birth: string | null;
-    national_id: string | null;
-    passport_number: string | null;
-  };
+  pii: PII;
   degree_level: string | null;
   major: string | null;
   institution: string | null;
@@ -64,6 +60,7 @@ export interface ProfileInput {
   skills: string[];
   languages: LanguageEntry[];
   experiences: Experience[];
+  details: ProfileDetails;
 }
 
 export function useSaveProfile() {

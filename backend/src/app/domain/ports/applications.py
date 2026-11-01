@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from app.domain.agent.models import TeachStep
 from app.domain.applications.filling import (
     ApplicationField,
     Checkpoint,
@@ -15,6 +16,7 @@ from app.domain.applications.filling import (
     FieldResolution,
     FillOutcome,
     FormField,
+    LiveStep,
     PendingQuestion,
     ResumeState,
 )
@@ -24,9 +26,22 @@ from app.domain.discovery.models import Opportunity
 from app.domain.essay.synthesis import EssayDraft
 from app.domain.llm.provider import EncryptedSecret
 from app.domain.notification.models import Notification, NotificationChannel, RenderedMessage
+from app.domain.ports.agent import DecisionSink, DomRecall, Navigator
 from app.domain.shared.enums import ApplicationState, NotifChannel, NotifStatus
 
 Resolver = Callable[[int, list[FormField]], Awaitable[list[FieldResolution]]]
+# Live viewport hook: a step and (when captured) a JPEG frame of the page.
+FillObserver = Callable[[LiveStep, bytes | None], Awaitable[None]]
+
+
+class ILiveFrameStore(Protocol):
+    """Latest browser frame per running application (in memory; frames are never persisted)."""
+
+    def put(self, user_id: uuid.UUID, application_id: uuid.UUID, frame: bytes) -> int:
+        """Store the newest frame; returns its sequence number."""
+        ...
+
+    def get(self, user_id: uuid.UUID, application_id: uuid.UUID) -> tuple[int, bytes] | None: ...
 
 
 class IFormFiller(Protocol):
@@ -38,6 +53,11 @@ class IFormFiller(Protocol):
         resolver: Resolver,
         documents: dict[uuid.UUID, DocumentBlob],
         storage_state: str | None = None,
+        observer: FillObserver | None = None,
+        learned_path: Sequence[TeachStep] = (),
+        navigator: Navigator | None = None,
+        dom_recall: DomRecall | None = None,
+        on_decision: DecisionSink | None = None,
     ) -> FillOutcome:
         """Fill step by step up to (never clicking) the final Submit. `storage_state` (saved
         portal sign-in / challenge cookies) seeds a fresh run; `resume` carries its own."""
@@ -51,6 +71,8 @@ class IFormFiller(Protocol):
         approved_hash: str,
         storage_state: str | None,
         documents: dict[uuid.UUID, DocumentBlob],
+        observer: FillObserver | None = None,
+        learned_path: Sequence[TeachStep] = (),
     ) -> SubmitOutcome:
         """Replay every step with the APPROVED values, read each control back from the page and
         click Submit only if the hash of the observed values equals `approved_hash`."""

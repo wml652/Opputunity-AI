@@ -1,17 +1,22 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 
 import { CampaignLauncher } from "@/components/discovery/campaign-launcher";
+import { TeachButton } from "@/components/applications/teach-button";
+import { GatewayStrip } from "@/components/pipeline/gateway-strip";
+import { LiveApplicationDock } from "@/components/pipeline/live-application-dock";
 import { ProgressBars } from "@/components/pipeline/progress-bars";
 import { DeadlineCell } from "@/components/discovery/outcome";
 import { Button } from "@/components/ui/button";
+import { MatchScore, SortControls, type SortKey, type SortOrder } from "@/components/ui/sort-controls";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill } from "@/components/ui/status";
 import { cn, formatTime } from "@/lib/cn";
 import { usePipelineSummary, useQueue } from "@/lib/discovery-queries";
 import { useEventStream } from "@/lib/event-stream";
-import { useBatchPrepare, useStartFilling } from "@/lib/m4-queries";
+import { useBatchPrepare, useRepairPortals, useStartFilling } from "@/lib/m4-queries";
 import { llmStatusPayloadSchema, type PipelineEvent } from "@/lib/schemas";
 
 const COUNTERS = [
@@ -102,6 +107,17 @@ function describe(event: PipelineEvent): { summary: string; tone?: "ok" | "err" 
       };
     case "source.failed":
       return { summary: `Source ${String(p.source)} failed: ${String(p.error)} (campaign continues)`, tone: "err" };
+    case "agent.workflow_saved":
+      return {
+        summary: `Agent brain: learned ${String(p.navigation_steps)} step(s), ${String(p.fields)} field(s), ${String(p.answers_learned)} answer(s) on ${String(p.domain)}${p.submitted ? " - you submitted it" : ""}`,
+        tone: "ok",
+      };
+    case "agent.teach_failed":
+      return { summary: `Teach Mode stopped: ${String(p.error)}`, tone: "err" };
+    case "application.auto_started":
+      return { summary: `Auto-filling now (match ${String(p.match_score)}): ${String(p.title)}`, tone: "ok" };
+    case "opportunity.portal_resolved":
+      return { summary: `Official portal for ${String(p.title)}: ${String(p.new)}`, tone: "ok" };
     case "session.captured":
       return { summary: `Browser session saved for ${String(p.domain)}`, tone: "ok" };
     case "session.failed":
@@ -211,6 +227,7 @@ export function PipelineOverview() {
         ) : null}
       </Panel>
 
+      <GatewayStrip />
       <CampaignLauncher compact />
 
       <div className="grid grid-cols-5 gap-3">
@@ -253,14 +270,19 @@ export function PipelineOverview() {
         </Panel>
         <QueuePanel />
       </div>
+      <LiveApplicationDock />
     </div>
   );
 }
 
 function QueuePanel() {
-  const { data: queue } = useQueue();
+  const [sort, setSort] = useState<SortKey>("match");
+  const [order, setOrder] = useState<SortOrder>("desc");
+  const { data: queue } = useQueue(sort, order);
   const start = useStartFilling();
   const batch = useBatchPrepare();
+  const repair = useRepairPortals();
+  const repaired = repair.data?.filter((r) => r.new_url).length ?? 0;
   const queued = queue?.filter((q) => q.state === "QUEUED" && q.opportunity.portal_url).length ?? 0;
   return (
     <Panel
@@ -268,6 +290,16 @@ function QueuePanel() {
       meta="deadline ASC"
       className="col-span-2"
       actions={
+        <span className="flex gap-1">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => repair.mutate()}
+          disabled={repair.isPending}
+          title="Replace aggregator / blog links with the official application links found on those pages"
+        >
+          {repair.isPending ? "Resolving" : "Repair portal links"}
+        </Button>
         <Button
           size="sm"
           onClick={() => batch.mutate(Math.min(5, queued))}
@@ -276,6 +308,7 @@ function QueuePanel() {
         >
           {batch.isPending ? "Staging" : "Auto-Stage Eligible Queue"}
         </Button>
+        </span>
       }
     >
       {batch.data ? (
@@ -284,11 +317,26 @@ function QueuePanel() {
           {batch.data.skipped_no_portal ? ` · ${batch.data.skipped_no_portal} without a portal URL` : ""}
         </p>
       ) : null}
+      <div className="border-b border-line px-3 py-1.5">
+        <SortControls
+          sort={sort}
+          order={order}
+          onChange={(s, o) => {
+            setSort(s);
+            setOrder(o);
+          }}
+        />
+      </div>
+      {repair.data ? (
+        <p className="border-b border-line px-3 py-1 font-mono text-2xs text-muted">
+          portal links: {repaired} resolved to official sites · {repair.data.length - repaired} unresolved
+        </p>
+      ) : null}
       {batch.error ? <p className="border-b border-line px-3 py-1 text-xs text-err">Could not start auto-stage</p> : null}
       <table className="w-full table-fixed border-collapse">
         <thead>
           <tr>
-            <th className={cn(th, "w-10")}>#</th>
+            <th className={cn(th, "w-12")}>Match</th>
             <th className={th}>Opportunity</th>
             <th className={cn(th, "w-24")}>Deadline</th>
             <th className={cn(th, "w-16")} />
@@ -300,7 +348,7 @@ function QueuePanel() {
           ) : (
             queue.map((q) => (
               <tr key={q.application_id} className="hover:bg-surface-2">
-                <td className={cn(td, "font-mono text-2xs text-faint tabular")}>{q.priority_rank ?? "—"}</td>
+                <td className={td}><MatchScore score={q.match_score} /></td>
                 <td className={cn(td, "py-1")}>
                   <Link href={`/applications/${q.application_id}`} className="block truncate text-xs hover:underline">
                     {q.opportunity.title}
@@ -309,6 +357,7 @@ function QueuePanel() {
                 </td>
                 <td className={td}><DeadlineCell iso={q.deadline_at} /></td>
                 <td className={cn(td, "text-right")}>
+                  <TeachButton applicationId={q.application_id} compact />
                   {q.state === "QUEUED" ? (
                     <Button
                       size="sm"

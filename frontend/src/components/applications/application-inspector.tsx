@@ -11,6 +11,8 @@ import { Textarea } from "@/components/ui/field";
 import { EmptyRow, Panel, td, th } from "@/components/ui/panel";
 import { StatusPill, type Tone } from "@/components/ui/status";
 import { cn, formatRelative } from "@/lib/cn";
+import { BlockedReason } from "@/components/applications/blocked-reason";
+import { TeachButton } from "@/components/applications/teach-button";
 import { UnblockButton } from "@/components/applications/unblock-button";
 import { useApplication, useEditDraft, useStartFilling } from "@/lib/m4-queries";
 import type { ApplicationDetailT, DraftT } from "@/lib/m4-schemas";
@@ -48,6 +50,7 @@ export function ApplicationInspector({ id }: { id: string }) {
         actions={
           <>
             {a.state === "BLOCKED_NEEDS_HUMAN" && o.portal_url ? <UnblockButton applicationId={a.id} /> : null}
+            {o.portal_url && !["SUBMITTED", "CANCELLED"].includes(a.state) ? <TeachButton applicationId={a.id} /> : null}
             {STARTABLE.has(a.state) ? (
               <Button size="sm" variant={a.state === "BLOCKED_NEEDS_HUMAN" ? "secondary" : "primary"} onClick={() => start.mutate(a.id)} disabled={start.isPending}>
                 {a.state === "BLOCKED_NEEDS_HUMAN" ? "Retry filling" : "Start filling"}
@@ -66,6 +69,9 @@ export function ApplicationInspector({ id }: { id: string }) {
           </>
         }
       >
+        {a.state === "BLOCKED_NEEDS_HUMAN" && a.last_error ? (
+          <BlockedReason reason={a.last_error} className="border-b border-line bg-warn-soft px-3 py-1.5" />
+        ) : null}
         <div className="grid grid-cols-4 gap-px bg-line">
           <div className="bg-surface px-3 py-2">
             <div className="text-[10px] uppercase tracking-wide text-faint">State</div>

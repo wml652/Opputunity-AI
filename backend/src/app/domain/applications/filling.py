@@ -126,6 +126,37 @@ class Checkpoint:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class LiveStep:
+    """One step of a running fill / submit, for the live viewport (no field values: only the
+    label being filled and where its value came from)."""
+
+    phase_label: str  # "Hop 2/4 -> apply.example.edu", 'Filling "Academic major"'...
+    current_url: str
+    step_index: int
+    progress_pct: float
+    field_label: str | None = None
+    value_source: str | None = None
+    final: bool = False
+
+
+class PortalGate(enum.StrEnum):
+    """Why the pathfinder found no fillable application form on the official site."""
+
+    LOGIN = "PORTAL_LOGIN_OR_REGISTER_REQUIRED"
+    EMAIL = "EMAIL_OR_PACKAGE_SUBMISSION_ONLY"
+    CLOSED = "APPLICATIONS_NOT_OPEN_OR_CLOSED"
+    AGGREGATOR = "AGGREGATOR_WITHOUT_OFFICIAL_LINK"
+    CHALLENGE = "BOT_CHALLENGE_NEEDS_HUMAN"
+    NO_FORM = "NO_APPLICATION_FORM"
+
+
+LOGIN_GATE_MESSAGE = (
+    f"[{PortalGate.LOGIN.value}] Official portal requires account sign-in or registration "
+    "(click 'Sign In in Browser & Resume')"
+)
+
+
 class FillOutcomeKind(enum.StrEnum):
     PAUSED = "PAUSED"  # unknown fields on this step; checkpoint taken
     READY_TO_SUBMIT = "READY_TO_SUBMIT"  # reached the final step; never clicks Submit
@@ -153,6 +184,10 @@ class FillOutcome:
     steps_completed: int = 0
     error: str | None = None
     log: list[str] = field(default_factory=list)
+    # Why no form could be filled (PortalGate value) and what the page said (recipient emails,
+    # sign-in URL, the "applications closed" sentence...).
+    gate: str | None = None
+    gate_info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

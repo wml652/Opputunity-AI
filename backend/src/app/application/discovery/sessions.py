@@ -37,6 +37,7 @@ from app.domain.shared.ids import new_uuid7
 
 SESSION_TTL = timedelta(days=30)
 CAPTURE_TIMEOUT_S = 300.0
+PORTAL_TIMEOUT_S = 1_800.0  # signing in / registering on a portal takes time
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +169,11 @@ class CaptureBrowserSession:
     ) -> None:
         assert self.deps.capturer is not None
         try:
-            state = await self.deps.capturer.capture(url, timeout_s=CAPTURE_TIMEOUT_S)
+            state = await self.deps.capturer.capture(
+                url,
+                timeout_s=PORTAL_TIMEOUT_S if kind == SessionKind.PORTAL else CAPTURE_TIMEOUT_S,
+                wait_for_close=kind == SessionKind.PORTAL,
+            )
         except Exception as exc:  # noqa: BLE001 - reported to the user, never raised further
             await _emit(
                 self.deps,

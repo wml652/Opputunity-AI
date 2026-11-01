@@ -256,6 +256,8 @@ class StudentProfileRow(Base):
     experiences: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default="[]"
     )
+    # Profile v2 non-PII details (ProfileDetails.to_dict()).
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = _ts(default_now=True)
     updated_at: Mapped[datetime] = _ts(default_now=True)
 
@@ -560,6 +562,34 @@ class BrowserSessionRow(Base):
     created_at: Mapped[datetime] = _ts(default_now=True)
 
 
+class AgentWorkflowRow(Base):
+    """A portal workflow learned in Teach Mode (see domain.agent)."""
+
+    __tablename__ = "agent_workflows"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = _owner()
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    ats_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    navigation_steps: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    field_mappings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    source_application_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    times_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = _ts(default_now=True)
+    updated_at: Mapped[datetime] = _ts(default_now=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "domain", "ats_type", name="uq_agent_workflows_domain"),
+    )
+
+
 class FinalVerificationRow(Base):
     __tablename__ = "final_verifications"
 
@@ -768,4 +798,6 @@ TENANT_TABLES = (
     "browser_sessions",
     "search_credentials",
     "final_verifications",
+    "agent_workflows",
+    "agent_trajectories",
 )

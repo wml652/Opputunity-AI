@@ -10,6 +10,7 @@ from app.api.v1.schemas import (
     ConnectionStatusOut,
     FetchModelsRequest,
     FetchModelsResponse,
+    ModelInfoOut,
     PresetOut,
     PromptTestOut,
     PromptTestRequest,
@@ -20,6 +21,7 @@ from app.api.v1.schemas import (
     VerifyResponse,
 )
 from app.application.llm.use_cases import ProviderConfigInput, ProviderConfigPatch
+from app.domain.llm.catalog import build_catalog
 from app.domain.llm.provider import PRESETS
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -118,7 +120,21 @@ async def fetch_models(
         base_url=body.base_url,
         api_key=_secret(body.api_key),
     )
-    return FetchModelsResponse(base_url=base_url, models=models)
+    catalog = build_catalog(models)
+    counts: dict[str, int] = {}
+    for info in catalog:
+        counts[info.category] = counts.get(info.category, 0) + 1
+    return FetchModelsResponse(
+        base_url=base_url,
+        models=models,
+        catalog=[
+            ModelInfoOut(
+                id=i.id, category=i.category, publisher=i.publisher, chat_capable=i.chat_capable
+            )
+            for i in catalog
+        ],
+        counts=counts,
+    )
 
 
 @router.post("/verify", response_model=VerifyResponse)

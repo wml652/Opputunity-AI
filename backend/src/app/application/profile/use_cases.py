@@ -23,6 +23,7 @@ from app.domain.profile.models import (
     DegreeLevel,
     Experience,
     Language,
+    ProfileDetails,
     StudentPII,
     StudentProfile,
     clean_skills,
@@ -53,6 +54,7 @@ class ProfileInput:
     skills: list[str] = field(default_factory=list)
     languages: list[Language] = field(default_factory=list)
     experiences: list[Experience] = field(default_factory=list)
+    details: ProfileDetails = field(default_factory=ProfileDetails)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +139,7 @@ class SaveProfile:
                     for e in data.experiences
                     if e.title.strip()
                 ],
+                details=ProfileDetails.from_dict(data.details.to_dict()),
                 created_at=existing.profile.created_at if existing else now,
                 updated_at=now,
             )

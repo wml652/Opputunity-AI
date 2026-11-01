@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from redis.asyncio import Redis
@@ -19,8 +20,11 @@ from app.api.container import (
     DiscoveryUseCases,
     NotificationUseCases,
     SessionUseCases,
+    TrainingUseCases,
     VaultUseCases,
 )
+from app.application.agent.teach import TeachAgentSession, TeachDeps
+from app.application.applications.live import GetLiveFrame
 from app.application.applications.submission import (
     ApproveSubmission,
     GetReceiptScreenshot,
@@ -51,6 +55,8 @@ from app.application.auth.use_cases import (
     RefreshSession,
     RegisterUser,
 )
+from app.application.discovery.portal_repair import RepairAggregatorPortals
+from app.application.discovery.portal_search import OfficialPortalSearch
 from app.application.discovery.sessions import (
     CaptureBrowserSession,
     DeleteBrowserSession,
@@ -135,9 +141,17 @@ from app.application.profile.use_cases import (
 )
 from app.application.services.evidence import EvidenceDeps, ProfileEvidenceRetriever
 from app.application.system.use_cases import GetWorkerStatus
+from app.application.training.service import (
+    BackfillTrajectories,
+    ExportTrainingData,
+    GetTrainingOverview,
+    TrainingDeps,
+    TrajectoryService,
+)
 from app.application.vault_deps import VaultDeps
+from app.domain.ports.agent import ITeachRecorder
 from app.domain.ports.applications import IApplicationRunner, INotifier
-from app.domain.ports.discovery import ICampaignRunner, IHeadfulSessionCapturer
+from app.domain.ports.discovery import ICampaignRunner, IHeadfulSessionCapturer, ISearchProvider
 from app.domain.ports.llm import (
     IRerankProvider,
     IRerankProviderFactory,
@@ -147,7 +161,9 @@ from app.domain.ports.llm import (
 from app.domain.shared.clock import Clock, SystemClock
 from app.domain.shared.enums import NotifChannel
 from app.infrastructure.browser.form_filler import PlaywrightFormFiller
+from app.infrastructure.browser.live_frames import InMemoryLiveFrameStore
 from app.infrastructure.browser.session_capture import PlaywrightSessionCapturer
+from app.infrastructure.browser.teach_recorder import PlaywrightTeachRecorder
 from app.infrastructure.config.settings import Settings
 from app.infrastructure.crypto.aes_gcm_cipher import AesGcmCipher
 from app.infrastructure.crypto.key_ring import KeyRing
@@ -206,6 +222,10 @@ class Infrastructure:
     campaign_runner: ICampaignRunner | None = None
     application_runner: IApplicationRunner | None = None
     session_capturer: IHeadfulSessionCapturer | None = None  # tests inject a fake
+    search_provider: ISearchProvider | None = None  # tests inject a fake search
+    live_frames: InMemoryLiveFrameStore = field(default_factory=InMemoryLiveFrameStore)
+    teach_recorder: ITeachRecorder | None = None  # tests inject a scripted recorder
+    teach_session: TeachAgentSession | None = None
     rerank_factory: IRerankProviderFactory | None = None  # tests inject a fake
     vision_factory: IVisionProviderFactory | None = None  # tests inject a fake
     background: set[asyncio.Task[None]] = field(default_factory=set)
@@ -380,12 +400,8 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
             politeness_seconds=s.crawl_politeness_seconds,
             respect_robots=s.crawl_respect_robots,
         ),
-        processor=HtmlContentProcessor(),
-        search=build_search_chain(
-            tavily_key=s.tavily_api_key.get_secret_value() if s.tavily_api_key else None,
-            brave_key=s.brave_api_key.get_secret_value() if s.brave_api_key else None,
-            http=infra.llm_factory.http_client,
-        ),
+        processor=HtmlContentProcessor(frozenset(infra.settings.aggregator_domains)),
+        search=default_search(infra),
         listings=LinkedInPublicAdapter(infra.llm_factory.http_client),
         extractor=LlmOpportunityExtractor(),
         fuzzy=LlmFuzzyEligibilityEvaluator(),
@@ -397,6 +413,8 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
         vision=ResolveVisionProvider(llm),
         layout=PdfLayoutParser(PypdfTextExtractor()),
         auto_stage=_auto_stager(infra),
+        start_application=_stream_starter(infra),
+        aggregator_domains=frozenset(infra.settings.aggregator_domains),
         linkedin_auth=LinkedInAuthenticatedAdapter(infra.crawl_guard)
         if playwright_available()
         else None,
@@ -411,7 +429,13 @@ def build_discovery_deps(infra: Infrastructure) -> DiscoveryDeps:
 def _auto_stager(
     infra: Infrastructure,
 ) -> Callable[
-    [uuid.UUID, uuid.UUID, int, Callable[[int, int, str | None], Awaitable[None]]],
+    [
+        uuid.UUID,
+        uuid.UUID,
+        int,
+        Callable[[int, int, str | None], Awaitable[None]],
+        list[uuid.UUID],
+    ],
     Awaitable[dict[str, int]],
 ]:
     async def stage(
@@ -419,10 +443,11 @@ def _auto_stager(
         campaign_id: uuid.UUID,
         limit: int,
         progress: Callable[[int, int, str | None], Awaitable[None]],
+        already: list[uuid.UUID],
     ) -> dict[str, int]:
         batch = BatchPrepare(infra.uow_factory, build_application_runner(infra))
         report = await AutoStageCampaign(infra.uow_factory, batch).execute(
-            user_id, campaign_id, limit, progress
+            user_id, campaign_id, limit, progress, already
         )
         counts: dict[str, int] = {}
         for state in report.states.values():
@@ -430,6 +455,93 @@ def _auto_stager(
         return counts
 
     return stage
+
+
+def default_search(infra: Infrastructure) -> ISearchProvider:
+    """The deployment's search chain (Tavily / Brave keys from settings, then the zero-key
+    fallback); tests inject `infra.search_provider`."""
+    if infra.search_provider is not None:
+        return infra.search_provider
+    s = infra.settings
+    return build_search_chain(
+        tavily_key=s.tavily_api_key.get_secret_value() if s.tavily_api_key else None,
+        brave_key=s.brave_api_key.get_secret_value() if s.brave_api_key else None,
+        http=infra.llm_factory.http_client,
+    )
+
+
+def build_trajectory_service(infra: Infrastructure) -> TrajectoryService:
+    llm = llm_deps(infra)
+    return TrajectoryService(
+        TrainingDeps(
+            uow_factory=infra.uow_factory,
+            embeddings=GetEmbeddingProvider(llm),
+            get_profile=build_vault(infra).get_profile,
+            clock=infra.clock,
+        )
+    )
+
+
+TRAINING_KIT = {
+    "notebook": "OOTG_Cloud_Trainer_Colab_Azure.ipynb",
+    "script": "train_qlora_unsloth.py",
+}
+
+
+def _training_kit(file: str) -> tuple[str, bytes] | None:
+    """The repo's `training/` kit (absent in slim container images)."""
+    name = TRAINING_KIT.get(file)
+    if name is None:
+        return None
+    for base in Path(__file__).resolve().parents:
+        candidate = base / "training" / name
+        if candidate.is_file():
+            return name, candidate.read_bytes()
+    return None
+
+
+def build_training(infra: Infrastructure) -> TrainingUseCases:
+    service = build_trajectory_service(infra)
+    return TrainingUseCases(
+        overview=GetTrainingOverview(service),
+        backfill=BackfillTrajectories(service),
+        export=ExportTrainingData(service),
+        kit=_training_kit,
+    )
+
+
+def build_teach(infra: Infrastructure, start: StartFilling) -> TeachAgentSession:
+    """One Teach Mode coordinator per app (it tracks the open windows)."""
+    if infra.teach_session is None:
+        s = infra.settings
+        headful = (
+            s.environment != "production" and s.allow_headful_capture and playwright_available()
+        )
+        recorder = infra.teach_recorder or (
+            PlaywrightTeachRecorder(infra.crawl_guard) if headful else None
+        )
+        vault = build_vault(infra)
+        infra.teach_session = TeachAgentSession(
+            TeachDeps(
+                uow_factory=infra.uow_factory,
+                cipher=infra.cipher,
+                clock=infra.clock,
+                recorder=recorder,
+                learn=vault.learn_answer,
+                get_profile=vault.get_profile,
+                start=start,
+                spawn=infra.spawn,
+                training=build_trajectory_service(infra),
+            )
+        )
+    return infra.teach_session
+
+
+def _stream_starter(infra: Infrastructure) -> Callable[[uuid.UUID, uuid.UUID], Awaitable[None]]:
+    async def start(user_id: uuid.UUID, application_id: uuid.UUID) -> None:
+        await build_application_runner(infra).start(user_id, application_id)
+
+    return start
 
 
 def build_sessions(infra: Infrastructure) -> SessionUseCases:
@@ -482,15 +594,20 @@ def build_discovery(infra: Infrastructure) -> DiscoveryUseCases:
         list_campaigns=ListCampaigns(infra.uow_factory),
         get_campaign=GetCampaign(infra.uow_factory),
         cancel_campaign=CancelCampaign(deps),
-        list_opportunities=ListOpportunities(infra.uow_factory),
+        list_opportunities=ListOpportunities(
+            infra.uow_factory, infra.clock, frozenset(infra.settings.aggregator_domains)
+        ),
         get_opportunity=GetOpportunity(infra.uow_factory),
-        queue=ListApplicationQueue(infra.uow_factory),
+        queue=ListApplicationQueue(
+            infra.uow_factory, infra.clock, frozenset(infra.settings.aggregator_domains)
+        ),
         summary=GetPipelineSummary(infra.uow_factory),
         runner=build_campaign_runner(infra),
         retry_page=RetryPage(deps),
         get_page=GetPage(infra.uow_factory),
         log_path=deps.campaign_log.path_for,
         spawn=infra.spawn,
+        repair_portals=RepairAggregatorPortals(deps),
     )
 
 
@@ -562,7 +679,9 @@ def build_application_deps(infra: Infrastructure) -> ApplicationDeps:
         cipher=infra.cipher,
         clock=infra.clock,
         storage=infra.storage,
-        filler=PlaywrightFormFiller(infra.crawl_guard),
+        filler=PlaywrightFormFiller(
+            infra.crawl_guard, aggregator_domains=frozenset(infra.settings.aggregator_domains)
+        ),
         get_profile=vault.get_profile,
         download=vault.download_document,
         recall=vault.recall,
@@ -571,6 +690,13 @@ def build_application_deps(infra: Infrastructure) -> ApplicationDeps:
         essays=build_essay_engine(infra),
         notify=NotifyUser(build_notification_deps(infra)),
         evidence=build_evidence_retriever(infra),
+        portal_search=OfficialPortalSearch(
+            default_search(infra), frozenset(infra.settings.aggregator_domains)
+        ),
+        aggregators=frozenset(infra.settings.aggregator_domains),
+        live_frames=infra.live_frames,
+        chat=ResolveChatProvider(llm_deps(infra)),
+        training=build_trajectory_service(infra),
     )
 
 
@@ -634,6 +760,8 @@ def build_applications(infra: Infrastructure) -> ApplicationUseCases:
         reject=RejectApplication(infra.uow_factory, infra.clock),
         receipt=GetReceiptScreenshot(deps),
         unblock=UnblockApplication(infra.uow_factory, build_sessions(infra).capture, start),
+        live_frame=GetLiveFrame(infra.live_frames),
+        teach=build_teach(infra, start),
     )
 
 
@@ -714,4 +842,5 @@ def build_api_container(infra: Infrastructure) -> ApiContainer:
         applications=build_applications(infra),
         notifications=build_notifications(infra),
         sessions=build_sessions(infra),
+        training=build_training(infra),
     )

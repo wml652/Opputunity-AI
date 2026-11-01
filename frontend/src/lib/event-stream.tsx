@@ -18,6 +18,7 @@ const DISCOVERY_EVENTS = new Set([
   "page.crawled",
   "search.results",
   "opportunity.found",
+  "opportunity.portal_resolved",
   "eligibility.verdict",
   "application.queued",
   "application.state",
@@ -27,6 +28,8 @@ const DISCOVERY_EVENTS = new Set([
   "page.retried",
   "source.failed",
   "applications.auto_staged",
+  "application.auto_started",
+  "agent.workflow_saved",
 ]);
 // Filler, inbox, essay and memory events refresh the application/inbox caches.
 const APPLICATION_EVENTS = new Set([
@@ -40,6 +43,33 @@ const SESSION_EVENTS = new Set(["session.captured", "session.failed"]);
 
 export type StreamState = "connecting" | "live" | "reconnecting";
 
+/** One step of a running fill / submit (live application viewport). */
+export interface LiveStep {
+  application_id: string;
+  opportunity_title: string;
+  state: string;
+  phase_label: string;
+  current_url: string;
+  step_index: number;
+  field_label: string | null;
+  value_source: string | null;
+  progress_pct: number;
+  frame_seq: number;
+  final: boolean;
+  updated_at: string;
+}
+
+/** One step the agent learned from the user in Teach Mode. */
+export interface LearnedStep {
+  application_id: string;
+  title: string;
+  n: number;
+  kind: string;
+  url: string;
+  label: string;
+  value_preview: string | null;
+}
+
 /** Latest streamed progress per campaign (both progress bars). */
 export interface LiveProgress {
   seq: number;
@@ -51,6 +81,8 @@ interface EventStreamValue {
   events: PipelineEvent[];
   lastSeq: number;
   progress: Record<string, LiveProgress>;
+  liveSteps: Record<string, LiveStep>;
+  learned: Record<string, LearnedStep[]>;
 }
 
 const EventStreamContext = createContext<EventStreamValue>({
@@ -58,6 +90,8 @@ const EventStreamContext = createContext<EventStreamValue>({
   events: [],
   lastSeq: 0,
   progress: {},
+  liveSteps: {},
+  learned: {},
 });
 
 export function useEventStream(): EventStreamValue {
@@ -74,6 +108,8 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<StreamState>("connecting");
   const [events, setEvents] = useState<PipelineEvent[]>([]);
   const [progress, setProgress] = useState<Record<string, LiveProgress>>({});
+  const [liveSteps, setLiveSteps] = useState<Record<string, LiveStep>>({});
+  const [learned, setLearned] = useState<Record<string, LearnedStep[]>>({});
   const lastSeq = useRef(0);
 
   useEffect(() => {
@@ -110,6 +146,20 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
       );
       if (campaignId && live.success) {
         setProgress((prev) => ({ ...prev, [campaignId]: { seq: event.seq, progress: live.data } }));
+      }
+      if (event.type === "agent.learned_step") {
+        const step = event.payload as unknown as LearnedStep;
+        if (typeof step.application_id === "string") {
+          setLearned((prev) => ({ ...prev, [step.application_id]: [...(prev[step.application_id] ?? []), step].slice(-40) }));
+        }
+        return;
+      }
+      if (event.type === "application.live_step") {
+        const step = event.payload as unknown as LiveStep;
+        if (typeof step.application_id === "string") {
+          setLiveSteps((prev) => ({ ...prev, [step.application_id]: step }));
+        }
+        return; // the live dock shows these; they would drown the event log
       }
       // Progress ticks drive the bars only; they would drown the event log.
       if (event.type === "campaign.progress") return;
@@ -156,7 +206,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
   }, [qc]);
 
   return (
-    <EventStreamContext.Provider value={{ state, events, lastSeq: events[0]?.seq ?? 0, progress }}>
+    <EventStreamContext.Provider value={{ state, events, lastSeq: events[0]?.seq ?? 0, progress, liveSteps, learned }}>
       {children}
     </EventStreamContext.Provider>
   );

@@ -38,6 +38,7 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
       { href: "/settings/llm", label: "LLM Gateway" },
       { href: "/settings/sessions", label: "Search & Sessions" },
       { href: "/settings/notifications", label: "Notifications" },
+      { href: "/settings/training", label: "Agent Brain & Training" },
     ],
   },
 ];

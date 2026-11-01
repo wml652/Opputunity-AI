@@ -7,21 +7,27 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
 
+from app.application.agent.navigator import llm_navigator
+from app.application.applications.live import live_observer
 from app.application.applications.portal_sessions import (
     combine_with_checkpoint,
     saved_portal_state,
 )
+from app.application.discovery.portal_search import OfficialPortalSearch
 from app.application.essay.synthesis import EssayRequest, SynthesizeEssay
+from app.application.llm.use_cases import ResolveChatProvider
 from app.application.memory.use_cases import LearnAnswer, RecallMemory, UpdateMemory
 from app.application.notifications.use_cases import NotifyUser
 from app.application.profile.use_cases import DownloadDocument, GetProfile
 from app.application.services.evidence import ProfileEvidenceRetriever
-from app.application.services.field_mapper import DocumentRef, FieldMapper
+from app.application.services.field_mapper import DocumentRef, FieldMapper, normalize_label
+from app.application.training.service import TrajectoryService
+from app.domain.agent.models import detect_ats, workflow_domain
 from app.domain.applications.filling import (
     ApplicationField,
     Checkpoint,
@@ -33,18 +39,22 @@ from app.domain.applications.filling import (
     FillOutcomeKind,
     FormField,
     PendingQuestion,
+    PortalGate,
     ResumeState,
 )
 from app.domain.applications.models import Application, Transition, advance
+from app.domain.discovery.listing import is_aggregator_url
 from app.domain.discovery.models import Opportunity
 from app.domain.essay.synthesis import EssayDraft
 from app.domain.events.models import NewEvent
 from app.domain.llm.provider import EncryptedSecret
 from app.domain.memory.models import normalize_question
 from app.domain.notification.models import Template
+from app.domain.ports.agent import DomRecall
 from app.domain.ports.applications import (
     IApplicationRunner,
     IFormFiller,
+    ILiveFrameStore,
     StoredCheckpoint,
     StoredField,
 )
@@ -52,10 +62,12 @@ from app.domain.ports.crypto import ICipher, aad
 from app.domain.ports.uow import IUnitOfWork, IUnitOfWorkFactory
 from app.domain.ports.vault import IObjectStorage
 from app.domain.profile.evidence import EvidenceAnswer
+from app.domain.profile.models import PII_V2_FIELDS, ProfileDetails
 from app.domain.shared.clock import Clock
 from app.domain.shared.enums import Actor, ApplicationState, QuestionStatus
 from app.domain.shared.errors import ConflictError, DomainError, NotFoundError, ValidationError
 from app.domain.shared.ids import new_uuid7
+from app.domain.training.models import Demonstration, TrajectorySource
 
 S = ApplicationState
 FILL_LEASE = timedelta(minutes=30)
@@ -72,6 +84,8 @@ PII_FACT_KEYS = frozenset(
         "date_of_birth",
         "national_id",
         "passport_number",
+        # profile v2 personal data: city, links, emergency contact, referees 1-3
+        *PII_V2_FIELDS,
     }
 )
 FIELDS_TABLE = "application_fields"
@@ -93,6 +107,14 @@ class ApplicationDeps:
     essays: SynthesizeEssay
     notify: NotifyUser
     evidence: ProfileEvidenceRetriever | None = None  # CV / transcript / essay evidence RAG
+    # Last resort for aggregator-only / dead portals: one web search for the official page.
+    portal_search: OfficialPortalSearch | None = None
+    aggregators: frozenset[str] = frozenset()
+    live_frames: ILiveFrameStore | None = None  # live viewport (latest frame per application)
+    # The user's chat model drives the LLM navigator when the pathfinder is stuck.
+    chat: ResolveChatProvider | None = None
+    # DOM-RAG memory + trajectory recording (imitation-learning data).
+    training: TrajectoryService | None = None
 
 
 async def _transition(
@@ -195,21 +217,114 @@ class RunApplication:
     async def _run(
         self, user_id: uuid.UUID, app: Application, opp: Opportunity
     ) -> FillOutcomeKind | None:
+        searched = False
+        if is_aggregator_url(opp.portal_url, self.deps.aggregators) or not opp.portal_url:
+            # Aggregator-only (no outbound link was found): look the official page up first.
+            searched = True
+            opp = await self._search_portal(user_id, opp, "the portal is an aggregator page")
         if not opp.portal_url:
             await self._finish_blocked(
                 user_id, app, opp, "the opportunity has no application portal URL"
             )
             return FillOutcomeKind.BLOCKED
+        while True:
+            try:
+                outcome = await self._fill(user_id, app, opp)
+            except DomainError as exc:
+                await self._finish_blocked(user_id, app, opp, exc.message)
+                return FillOutcomeKind.BLOCKED
+            except Exception as exc:  # noqa: BLE001 - the run must always leave a visible state
+                message = f"{type(exc).__name__}: {str(exc)[:300]}"
+                if not searched and _is_navigation_failure(message):
+                    searched = True
+                    found = await self._search_portal(user_id, opp, "the portal did not load")
+                    if found.portal_url != opp.portal_url:
+                        opp = found
+                        continue
+                await self._finish_blocked(user_id, app, opp, message)
+                return FillOutcomeKind.ERROR
+            dead_end = outcome.kind is FillOutcomeKind.BLOCKED and outcome.gate in (
+                PortalGate.AGGREGATOR.value,
+                PortalGate.NO_FORM.value,
+            )
+            empty = outcome.checkpoint is None or not outcome.checkpoint.fill_ledger
+            if dead_end and empty and not searched:
+                searched = True
+                found = await self._search_portal(user_id, opp, f"pathfinder: {outcome.gate}")
+                if found.portal_url != opp.portal_url:
+                    opp = found
+                    continue
+            await self._finish(user_id, app, opp, outcome)
+            return outcome.kind
+
+    async def _search_portal(self, user_id: uuid.UUID, opp: Opportunity, why: str) -> Opportunity:
+        """One web search for the official application page; persists the better portal URL
+        (and tells the UI) or returns the opportunity unchanged."""
+        if self.deps.portal_search is None:
+            return opp
+        new = await self.deps.portal_search.find(
+            opp.title, opp.organization, not_url=opp.portal_url
+        )
+        if not new or new == opp.portal_url:
+            return opp
+        async with self.deps.uow_factory(user_id) as uow:
+            await uow.opportunities.set_portal_url(user_id, opp.id, new)
+            await uow.events.append(
+                NewEvent(
+                    user_id=user_id,
+                    type="opportunity.portal_resolved",
+                    payload={
+                        "opportunity_id": str(opp.id),
+                        "title": opp.title,
+                        "old": opp.portal_url,
+                        "new": new,
+                        "via": "search",
+                        "why": why,
+                    },
+                )
+            )
+            await uow.commit()
+        return replace(opp, portal_url=new)
+
+    async def _email_application(
+        self, user_id: uuid.UUID, app: Application, opp: Opportunity, outcome: FillOutcome
+    ) -> FillOutcome:
+        """Applications by email / document package: draft the student's statement of purpose
+        (stylometric engine, attached to this application) so it is ready to copy, and tell the
+        user where to send it. Nothing is ever emailed automatically."""
+        recipients = [str(r) for r in outcome.gate_info.get("recipients", [])][:3]
+        draft = None
         try:
-            outcome = await self._fill(user_id, app, opp)
-        except DomainError as exc:
-            await self._finish_blocked(user_id, app, opp, exc.message)
-            return FillOutcomeKind.BLOCKED
-        except Exception as exc:  # noqa: BLE001 - the run must always leave a visible state
-            await self._finish_blocked(user_id, app, opp, f"{type(exc).__name__}: {str(exc)[:300]}")
-            return FillOutcomeKind.ERROR
-        await self._finish(user_id, app, opp, outcome)
-        return outcome.kind
+            draft = await self.deps.essays.execute(
+                user_id,
+                EssayRequest(
+                    prompt=(
+                        f"Statement of purpose / application email for {opp.title}"
+                        + (f" at {opp.organization}" if opp.organization else "")
+                    ),
+                    word_limit=450,
+                    application_id=app.id,
+                    opportunity_id=opp.id,
+                    field_key="email_application",
+                    ai_policy=opp.ai_policy,
+                    organization=opp.organization,
+                ),
+            )
+        except DomainError:
+            draft = None
+        where = (
+            f"email your application to {', '.join(recipients)}"
+            if recipients
+            else "send the application package described on the official page"
+            + (
+                f" (form: {outcome.gate_info['form_url']})"
+                if outcome.gate_info.get("form_url")
+                else ""
+            )
+        )
+        ready = "; a statement-of-purpose draft is ready to copy" if draft is not None else ""
+        message = f"[{PortalGate.EMAIL.value}] No online form: {where}{ready}"
+        return replace(outcome, error=message[:500])
 
     # -- filling ---------------------------------------------------------------------------------
 
@@ -274,6 +389,19 @@ class RunApplication:
                 user_id, f.label, options=f.options, pii_values=pii_values, memory=memory
             )
 
+        # The agent brain: a route learned in Teach Mode, and (Tier 1) the profile facts the
+        # student mapped to this portal's labels.
+        async with self.deps.uow_factory(user_id) as uow:
+            workflow = await uow.agent_workflows.find(
+                user_id, workflow_domain(opp.portal_url or ""), detect_ats(opp.portal_url or "")
+            )
+        learned = {
+            key: m.mapped_profile_path
+            for m in (workflow.field_mappings if workflow else [])
+            if m.mapped_profile_path
+            for key in (normalize_label(m.field_label), m.field_name.lower())
+            if key
+        }
         mapper = FieldMapper(
             facts=facts,
             documents=[DocumentRef(d.id, d.kind, d.filename) for d in documents],
@@ -281,6 +409,7 @@ class RunApplication:
             essay=essay,
             known=known,
             evidence=evidence if self.deps.evidence is not None else None,
+            learned=learned,
         )
 
         async def resolver(step_index: int, fields: list[FormField]) -> list[FieldResolution]:
@@ -327,10 +456,17 @@ class RunApplication:
         assert opp.portal_url is not None
         # Cookies from a portal sign-in / solved challenge the user did in a visible browser.
         session_state, session_at = await saved_portal_state(
-            self.deps.uow_factory, self.deps.cipher, self.deps.clock.now(), user_id, opp.portal_url
+            self.deps.uow_factory,
+            self.deps.cipher,
+            self.deps.clock.now(),
+            user_id,
+            opp.portal_url,
+            *([checkpoint.checkpoint.url] if checkpoint is not None else []),
         )
         resume = None
-        if checkpoint is not None:
+        # Resume only where something was filled; an empty checkpoint (a gate, a dead end, an
+        # old aggregator page) restarts from the - possibly repaired - portal URL instead.
+        if checkpoint is not None and checkpoint.checkpoint.fill_ledger:
             state = self.deps.cipher.decrypt(
                 checkpoint.storage_state,
                 aad(CHECKPOINT_TABLE, "storage_state", user_id, checkpoint.checkpoint.id),
@@ -344,13 +480,54 @@ class RunApplication:
                 )
                 or state,
             )
-        return await self.deps.filler.run(
+        navigator = None
+        if self.deps.chat is not None:
+            try:
+                navigator = llm_navigator(await self.deps.chat.execute(user_id), pii_values)
+            except DomainError:
+                navigator = None
+        dom_recall, decisions = await self._experience(user_id)
+        outcome = await self.deps.filler.run(
             opp.portal_url,
             resume=resume,
             resolver=resolver,
             documents=blobs,
             storage_state=session_state,
+            learned_path=workflow.navigation_steps if workflow else (),
+            navigator=navigator,
+            dom_recall=dom_recall,
+            on_decision=decisions.append_decision if decisions else None,
+            observer=live_observer(
+                self.deps.uow_factory,
+                self.deps.live_frames,
+                self.deps.clock,
+                user_id,
+                app.id,
+                opp.title,
+                "FILLING",
+            ),
         )
+        if workflow is not None:
+            async with self.deps.uow_factory(user_id) as uow:
+                await uow.agent_workflows.record_use(
+                    user_id, workflow.id, outcome.kind is FillOutcomeKind.READY_TO_SUBMIT
+                )
+                await uow.commit()
+        if decisions:
+            await decisions.save(app.id, outcome.kind)
+        return outcome
+
+    async def _experience(self, user_id: uuid.UUID) -> tuple[DomRecall | None, _DecisionLog | None]:
+        """DOM-RAG recall (Tier 2 / few-shot for Tier 3) and the decision log of this run."""
+        training = self.deps.training
+        if training is None:
+            return None, None
+        known = await training.known_values(user_id)
+
+        async def recall(signature: str) -> list[Demonstration]:
+            return await training.recall(user_id, signature, known)
+
+        return recall, _DecisionLog(training, user_id, known)
 
     async def _facts(self, user_id: uuid.UUID) -> dict[str, str]:
         view = await self.deps.get_profile.execute(user_id)
@@ -377,6 +554,7 @@ class RunApplication:
             "skills": ", ".join(p.skills),
             "languages": ", ".join(f"{lang.name} ({lang.level})" for lang in p.languages),
             **{k: v for k, v in p.pii.to_dict().items() if v},
+            **profile_v2_facts(p.details),
         }
         return {k: v for k, v in facts.items() if v}
 
@@ -420,6 +598,8 @@ class RunApplication:
     async def _finish(
         self, user_id: uuid.UUID, app: Application, opp: Opportunity, outcome: FillOutcome
     ) -> None:
+        if outcome.gate == PortalGate.EMAIL.value:
+            outcome = await self._email_application(user_id, app, opp, outcome)
         checkpoint = (
             await self._save_checkpoint(user_id, app, outcome.checkpoint)
             if outcome.checkpoint
@@ -590,7 +770,12 @@ class BatchPrepare:
     runner: IApplicationRunner
 
     async def execute(
-        self, user_id: uuid.UUID, limit: int = 5, *, campaign_id: uuid.UUID | None = None
+        self,
+        user_id: uuid.UUID,
+        limit: int = 5,
+        *,
+        campaign_id: uuid.UUID | None = None,
+        exclude: frozenset[uuid.UUID] = frozenset(),
     ) -> BatchResult:
         if not 1 <= limit <= MAX_BATCH:
             raise ValidationError(f"limit must be 1-{MAX_BATCH}")
@@ -598,6 +783,7 @@ class BatchPrepare:
             queued = await uow.app_details.list_by_states(user_id, [S.QUEUED])  # deadline ASC
         if campaign_id is not None:
             queued = [(app, opp) for app, opp in queued if opp.campaign_id == campaign_id]
+        queued = [(app, opp) for app, opp in queued if app.id not in exclude]
         with_portal = [(app, opp) for app, opp in queued if opp.portal_url]
         picked = with_portal[:limit]
         for app, _ in picked:
@@ -605,6 +791,90 @@ class BatchPrepare:
         return BatchResult(
             [app.id for app, _ in picked], skipped_no_portal=len(queued) - len(with_portal)
         )
+
+
+_NAVIGATION_FAILURE = ("Page.goto", "net::ERR_", "TimeoutError", "ERR_NAME_NOT_RESOLVED")
+
+
+class _DecisionLog:
+    """The agent's decisions during one run; stored once the outcome is known - success
+    (reached Ready for OK / a question) or failure (blocked) - as trajectories."""
+
+    def __init__(
+        self, training: TrajectoryService, user_id: uuid.UUID, known: dict[str, str]
+    ) -> None:
+        self.training = training
+        self.user_id = user_id
+        self.known = known
+        self.items: list[tuple[str, dict[str, Any]]] = []
+
+    def __bool__(self) -> bool:  # an empty log is still a log
+        return True
+
+    def append_decision(self, signature: str, action: dict[str, Any]) -> None:
+        self.items.append((signature, dict(action)))
+
+    async def save(self, application_id: uuid.UUID, kind: FillOutcomeKind) -> None:
+        source = (
+            TrajectorySource.AUTO_FAILURE
+            if kind in (FillOutcomeKind.BLOCKED, FillOutcomeKind.ERROR)
+            else TrajectorySource.AUTO_SUCCESS
+        )
+        for signature, action in self.items:
+            url = str(action.pop("url", "") or "")
+            await self.training.record(
+                self.user_id,
+                source,
+                url=url,
+                signature=signature,
+                action=action,
+                application_id=application_id,
+                known=self.known,
+            )
+
+
+def _is_navigation_failure(message: str) -> bool:
+    return any(marker in message for marker in _NAVIGATION_FAILURE)
+
+
+def _yes_no(value: bool | None) -> str:
+    return "" if value is None else ("Yes" if value else "No")
+
+
+def profile_v2_facts(d: ProfileDetails) -> dict[str, str]:
+    """Form-filler facts from profile v2 (non-PII part; the PII part comes from StudentPII)."""
+    english = ""
+    if d.english_proficiency_type is not None:
+        kind = d.english_proficiency_type.value
+        english = {
+            "NATIVE": "Native speaker",
+            "MOI_EXEMPT": "English-medium instruction (MOI)",
+            "NONE": "",
+        }.get(kind, f"{kind} {d.english_proficiency_score or ''}".strip())
+    facts = {
+        "current_semester_or_year": d.current_semester_or_year or "",
+        "cgpa_percentage": f"{d.cgpa_percentage:g}" if d.cgpa_percentage is not None else "",
+        "secondary_school_qualification": d.secondary_school_qualification or "",
+        "secondary_school_percentage": (
+            f"{d.secondary_school_percentage:g}"
+            if d.secondary_school_percentage is not None
+            else ""
+        ),
+        "minor_or_specialization": d.minor_or_specialization or "",
+        "thesis_or_fyp_title": d.thesis_or_fyp_title or "",
+        "academic_honors": ", ".join(d.academic_honors),
+        "english_proficiency": english,
+        "research_interests": ", ".join(d.research_interests),
+        "publications_count": str(d.publications_count) if d.publications_count is not None else "",
+        "preferred_work_mode": d.preferred_work_mode.value.title() if d.preferred_work_mode else "",
+        "earliest_start_date": d.earliest_start_date or "",
+        "requires_visa_sponsorship": _yes_no(d.requires_visa_sponsorship),
+        "has_valid_passport": _yes_no(d.has_valid_passport),
+        "financial_need_eligible": _yes_no(d.financial_need_eligible),
+        "first_generation_student": _yes_no(d.first_generation_student),
+    }
+    facts |= {f"test_{k.lower()}": v for k, v in d.standardized_tests.items()}
+    return {k: v for k, v in facts.items() if v}
 
 
 # States in which an auto-staged application is still being worked on by the filler.
@@ -644,8 +914,18 @@ class AutoStageCampaign:
         campaign_id: uuid.UUID,
         limit: int,
         progress: StageProgress | None = None,
+        already: Sequence[uuid.UUID] = (),
     ) -> StageReport:
-        started = (await self.batch.execute(user_id, limit, campaign_id=campaign_id)).started
+        """`already`: applications the campaign started while it was still crawling (streaming
+        auto-apply); they count against `limit` and are waited for as well."""
+        started = list(dict.fromkeys(already))
+        remaining = limit - len(started)
+        if remaining > 0:
+            started += (
+                await self.batch.execute(
+                    user_id, remaining, campaign_id=campaign_id, exclude=frozenset(started)
+                )
+            ).started
         states: dict[uuid.UUID, str] = dict.fromkeys(started, S.QUEUED.value)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout_s

@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from app.domain.applications.models import Application, Transition
-from app.domain.discovery.listing import HarvestedCard, PageKind
+from app.domain.discovery.listing import HarvestedCard, OutboundLink, PageKind
 from app.domain.discovery.models import (
     Campaign,
     CampaignPhase,
@@ -95,6 +95,8 @@ class ProcessedPage:
     kind: str = PageKind.ARTICLE  # article | listing | mixed
     cards: list[HarvestedCard] = field(default_factory=list)  # listing cards, links absolute
     diagnostics: dict[str, Any] = field(default_factory=dict)  # segmenter/distiller stats
+    # Off-site official / application links found on the page (best first).
+    outbound_links: list[OutboundLink] = field(default_factory=list)
 
 
 class IContentProcessor(Protocol):
@@ -203,7 +205,7 @@ class ISearchCredentialRepository(Protocol):
 
 
 class IHeadfulSessionCapturer(Protocol):
-    async def capture(self, url: str, *, timeout_s: float) -> str:
+    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
         """Open a VISIBLE browser at `url` for the user to pass a challenge / log in; return the
         resulting storage_state JSON once the page is usable (or raise on timeout/close)."""
         ...
@@ -302,6 +304,10 @@ class IOpportunityRepository(Protocol):
 
     async def set_outcome(
         self, user_id: uuid.UUID, opportunity_id: uuid.UUID, outcome: EligibilityOutcome
+    ) -> None: ...
+
+    async def set_portal_url(
+        self, user_id: uuid.UUID, opportunity_id: uuid.UUID, portal_url: str
     ) -> None: ...
 
     async def counts(self, user_id: uuid.UUID) -> dict[str, int]: ...

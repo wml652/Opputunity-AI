@@ -24,7 +24,19 @@ export const presetSchema = z.object({
   base_url: z.string().nullable(),
 });
 
-export const fetchModelsSchema = z.object({ base_url: z.string(), models: z.array(z.string()) });
+export const modelInfoSchema = z.object({
+  id: z.string(),
+  category: z.string(),
+  publisher: z.string(),
+  chat_capable: z.boolean(),
+});
+export type ModelInfo = z.infer<typeof modelInfoSchema>;
+export const fetchModelsSchema = z.object({
+  base_url: z.string(),
+  models: z.array(z.string()),
+  catalog: z.array(modelInfoSchema).optional(),
+  counts: z.record(z.number()).optional(),
+});
 export type Preset = z.infer<typeof presetSchema>;
 
 export const connectionCheckSchema = z.object({
@@ -131,13 +143,63 @@ export const degreeLevel = z.enum(["HIGH_SCHOOL", "BACHELOR", "MASTER", "PHD", "
 export const docKind = z.enum(["CV", "TRANSCRIPT", "ID", "CERTIFICATE", "OTHER"]);
 export type DocKind = z.infer<typeof docKind>;
 
+export const refereeSchema = z.object({
+  name: z.string().nullable(),
+  title: z.string().nullable(),
+  department: z.string().nullable(),
+  organization: z.string().nullable(),
+  email: z.string().nullable(),
+  phone: z.string().nullable(),
+  relationship: z.string().nullable(),
+});
+export type Referee = z.infer<typeof refereeSchema>;
+
 export const piiSchema = z.object({
   home_address: z.string().nullable().optional(),
   phone: z.string().nullable().optional(),
   date_of_birth: z.string().nullable().optional(),
   national_id: z.string().nullable().optional(),
   passport_number: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
+  state_or_province: z.string().nullable().optional(),
+  postal_code: z.string().nullable().optional(),
+  gender: z.string().nullable().optional(),
+  marital_status: z.string().nullable().optional(),
+  linkedin_url: z.string().nullable().optional(),
+  github_url: z.string().nullable().optional(),
+  portfolio_url: z.string().nullable().optional(),
+  orcid_or_scholar_url: z.string().nullable().optional(),
+  emergency_contact: z
+    .object({ name: z.string().nullable(), phone: z.string().nullable(), relationship: z.string().nullable() })
+    .nullable()
+    .optional(),
+  referees: z.array(refereeSchema).optional(),
 });
+export type PII = z.infer<typeof piiSchema>;
+
+export const englishTypes = ["IELTS", "TOEFL", "DUOLINGO", "PTE", "MOI_EXEMPT", "NATIVE", "NONE"] as const;
+export const workModes = ["REMOTE", "HYBRID", "ONSITE", "ANY"] as const;
+export const profileDetailsSchema = z.object({
+  current_semester_or_year: z.string().nullable(),
+  cgpa_percentage: z.number().nullable(),
+  secondary_school_qualification: z.string().nullable(),
+  secondary_school_percentage: z.number().nullable(),
+  minor_or_specialization: z.string().nullable(),
+  thesis_or_fyp_title: z.string().nullable(),
+  academic_honors: z.array(z.string()),
+  english_proficiency_type: z.enum(englishTypes).nullable(),
+  english_proficiency_score: z.string().nullable(),
+  standardized_tests: z.record(z.string()),
+  publications_count: z.number().int().nullable(),
+  research_interests: z.array(z.string()),
+  preferred_work_mode: z.enum(workModes).nullable(),
+  earliest_start_date: z.string().nullable(),
+  requires_visa_sponsorship: z.boolean().nullable(),
+  has_valid_passport: z.boolean().nullable(),
+  financial_need_eligible: z.boolean().nullable(),
+  first_generation_student: z.boolean().nullable(),
+});
+export type ProfileDetails = z.infer<typeof profileDetailsSchema>;
 
 export const languageSchema = z.object({ name: z.string(), level: z.string() });
 export const experienceSchema = z.object({
@@ -164,6 +226,7 @@ export const profileSchema = z.object({
   skills: z.array(z.string()),
   languages: z.array(languageSchema),
   experiences: z.array(experienceSchema),
+  details: profileDetailsSchema.optional(),
   pii_encrypted: z.boolean(),
   pii_key_version: z.number().int().nullable(),
   updated_at: z.string().nullable(),

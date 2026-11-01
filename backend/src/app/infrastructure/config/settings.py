@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     maintenance_interval_seconds: float = 300.0
     # Browser filling runs in parallel (batch auto-stage); each is a Chromium instance.
     max_parallel_fills: int = 2
+    # Extra aggregator / directory hosts (beyond the built-in list): never typed into by the
+    # form filler; their URLs are replaced by the official outbound link.
+    aggregator_domains: list[str] = Field(default_factory=list)
     log_level: str = "INFO"
     log_json: bool = False
 

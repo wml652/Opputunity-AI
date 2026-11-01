@@ -12,6 +12,8 @@ import { formatRelative } from "@/lib/cn";
 import type { Experience, LanguageEntry, Profile } from "@/lib/schemas";
 import { useProfile, useSaveProfile, type ProfileInput } from "@/lib/vault-queries";
 
+import { EMPTY_DETAILS, ProfileDetailsPanels, ProfilePiiPanels } from "./profile-v2-sections";
+
 const DEGREES = [
   { value: "HIGH_SCHOOL", label: "High school" },
   { value: "BACHELOR", label: "Bachelor" },
@@ -35,18 +37,13 @@ const EMPTY: ProfileInput = {
   skills: [],
   languages: [],
   experiences: [],
+  details: EMPTY_DETAILS,
 };
 
 function fromProfile(p: Profile): ProfileInput {
   return {
     full_name: p.full_name,
-    pii: {
-      home_address: p.pii.home_address ?? null,
-      phone: p.pii.phone ?? null,
-      date_of_birth: p.pii.date_of_birth ?? null,
-      national_id: p.pii.national_id ?? null,
-      passport_number: p.pii.passport_number ?? null,
-    },
+    pii: { ...p.pii, referees: p.pii.referees ?? [] },
     degree_level: p.degree_level,
     major: p.major,
     institution: p.institution,
@@ -58,10 +55,11 @@ function fromProfile(p: Profile): ProfileInput {
     skills: p.skills,
     languages: p.languages,
     experiences: p.experiences,
+    details: p.details ?? EMPTY_DETAILS,
   };
 }
 
-const text = (v: string | null) => v ?? "";
+const text = (v: string | null | undefined) => v ?? "";
 const orNull = (v: string) => (v.trim() ? v : null);
 
 export function ProfileEditor() {
@@ -79,7 +77,7 @@ function ProfileForm({ profile }: { profile: Profile | null }) {
 
   const set = <K extends keyof ProfileInput>(key: K, value: ProfileInput[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
-  const setPii = (key: keyof ProfileInput["pii"], value: string) =>
+  const setPii = (key: "home_address" | "phone" | "date_of_birth" | "national_id" | "passport_number", value: string) =>
     setForm((f) => ({ ...f, pii: { ...f.pii, [key]: orNull(value) } }));
 
   const gpaNorm =
@@ -228,6 +226,9 @@ function ProfileForm({ profile }: { profile: Profile | null }) {
           </Field>
         </div>
       </Panel>
+
+      <ProfileDetailsPanels value={form.details} onChange={(v) => set("details", v)} />
+      <ProfilePiiPanels value={form.pii} onChange={(v) => set("pii", v)} />
 
       <div className="grid grid-cols-3 gap-3">
         <LanguagesPanel value={form.languages} onChange={(v) => set("languages", v)} />

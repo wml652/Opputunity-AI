@@ -34,6 +34,8 @@ export const applicationSchema = z.object({
   priority_rank: z.number().nullable(),
   deadline_at: z.string().nullable(),
   version: z.number(),
+  // "[GATE_CODE] reason" when blocked: sign-in wall, email-only, closed, aggregator...
+  last_error: z.string().nullable().optional(),
 });
 
 export const transitionSchema = z.object({

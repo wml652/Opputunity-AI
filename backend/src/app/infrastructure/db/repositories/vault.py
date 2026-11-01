@@ -22,7 +22,14 @@ from app.domain.ports.vault import (
     StoredProfile,
 )
 from app.domain.profile.documents import Document
-from app.domain.profile.models import GPA, Experience, Language, StudentPII, StudentProfile
+from app.domain.profile.models import (
+    GPA,
+    Experience,
+    Language,
+    ProfileDetails,
+    StudentPII,
+    StudentProfile,
+)
 from app.domain.shared.ids import new_uuid7
 from app.infrastructure.db.models import (
     DocumentRow,
@@ -72,6 +79,7 @@ class SqlProfileRepository:
             skills=list(row.skills or []),
             languages=[Language(**lang) for lang in row.languages or []],
             experiences=[Experience(**exp) for exp in row.experiences or []],
+            details=ProfileDetails.from_dict(row.details),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -108,6 +116,7 @@ class SqlProfileRepository:
                 }
                 for e in profile.experiences
             ],
+            "details": profile.details.to_dict(),
             "updated_at": profile.updated_at,
         }
         stmt = pg_insert(StudentProfileRow).values(

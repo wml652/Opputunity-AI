@@ -16,6 +16,7 @@ import {
 import type { ConnectionCheck, ProviderConfig } from "@/lib/schemas";
 
 import { ProviderSlotsEditor } from "./model-slots";
+import { ModelSwitcher } from "./model-switcher";
 import { PromptTest } from "./prompt-test";
 import { ProviderForm } from "./provider-form";
 
@@ -42,6 +43,7 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
   const remove = useDeleteProvider();
   const error = verify.error ?? activate.error ?? remove.error;
   const [editing, setEditing] = useState(false);
+  const [switching, setSwitching] = useState(false);
 
   return (
     <>
@@ -90,9 +92,13 @@ function ProviderRow({ provider }: { provider: ProviderConfig }) {
             <Button size="sm" onClick={() => verify.mutate(provider.id)} disabled={verify.isPending}>
               Verify
             </Button>
+            <Button size="sm" variant="primary" onClick={() => setSwitching(true)} title="Switch any model slot in place">
+              Models
+            </Button>
             <Button size="sm" onClick={() => setEditing((v) => !v)}>
               Slots
             </Button>
+            <ModelSwitcher provider={provider} open={switching} onOpenChange={setSwitching} />
             {!provider.is_active ? (
               <Button size="sm" onClick={() => activate.mutate(provider.id)} disabled={activate.isPending}>
                 Activate

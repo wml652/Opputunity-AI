@@ -25,6 +25,7 @@ from app.domain.profile.evidence import EvidenceAnswer
 from app.domain.shared.enums import DocKind
 
 PROFILE_CONFIDENCE = 0.97
+PROFILE_V2_CONFIDENCE = 0.95  # profile v2 facts (links, city, referees, tests...)
 
 # (phrases, fact key). More specific phrases first; the longest matching phrase wins.
 SYNONYMS: list[tuple[tuple[str, ...], str]] = [
@@ -81,6 +82,181 @@ SYNONYMS: list[tuple[tuple[str, ...], str]] = [
     ),
 ]
 
+# Profile v2 (deterministic, PROFILE_V2_CONFIDENCE). Matched together with SYNONYMS: the longest
+# matching phrase wins, so "emergency contact phone" beats "phone".
+SYNONYMS_V2: list[tuple[tuple[str, ...], str]] = [
+    (("linkedin profile", "linkedin url", "linkedin"), "linkedin_url"),
+    (("github profile", "github url", "github username", "github"), "github_url"),
+    (
+        (
+            "portfolio url",
+            "portfolio",
+            "personal website",
+            "personal site",
+            "website url",
+            "website",
+        ),
+        "portfolio_url",
+    ),
+    (("orcid", "google scholar", "scholar profile", "researchgate"), "orcid_or_scholar_url"),
+    (("city of residence", "current city", "home city", "city", "town"), "city"),
+    (("state or province", "state province", "province", "state region"), "state_or_province"),
+    (("postal code", "zip code", "post code", "postcode", "zip"), "postal_code"),
+    (("gender", "sex"), "gender"),
+    (("marital status", "marital"), "marital_status"),
+    (
+        (
+            "current semester",
+            "current year of study",
+            "year of study",
+            "semester",
+            "current year",
+            "academic year",
+        ),
+        "current_semester_or_year",
+    ),
+    (
+        (
+            "secondary school qualification",
+            "high school qualification",
+            "intermediate qualification",
+            "secondary education",
+            "high school",
+            "secondary school",
+        ),
+        "secondary_school_qualification",
+    ),
+    (
+        (
+            "high school gpa",
+            "high school percentage",
+            "secondary school gpa",
+            "secondary school percentage",
+            "intermediate marks",
+            "intermediate percentage",
+            "a level grades",
+            "hssc marks",
+            "fsc marks",
+        ),
+        "secondary_school_percentage",
+    ),
+    (("cgpa percentage", "percentage of marks", "aggregate percentage"), "cgpa_percentage"),
+    (("minor", "specialization", "specialisation", "concentration"), "minor_or_specialization"),
+    (
+        (
+            "thesis title",
+            "fyp title",
+            "final year project",
+            "dissertation title",
+            "research topic",
+            "thesis",
+        ),
+        "thesis_or_fyp_title",
+    ),
+    (
+        (
+            "english language proficiency",
+            "english proficiency",
+            "english language test",
+            "english test",
+            "ielts score",
+            "toefl score",
+            "ielts",
+            "toefl",
+            "duolingo",
+        ),
+        "english_proficiency",
+    ),
+    (("research interests", "research areas", "areas of interest"), "research_interests"),
+    (("number of publications", "publications count"), "publications_count"),
+    (("academic honors", "academic honours", "honors and awards", "honours"), "academic_honors"),
+    (
+        (
+            "require visa sponsorship",
+            "need visa sponsorship",
+            "visa sponsorship",
+            "require sponsorship",
+            "need sponsorship",
+        ),
+        "requires_visa_sponsorship",
+    ),
+    (("valid passport", "hold a passport", "have a passport"), "has_valid_passport"),
+    (
+        ("preferred work mode", "work mode", "work arrangement", "remote or onsite"),
+        "preferred_work_mode",
+    ),
+    (
+        ("earliest start date", "available from", "availability date", "start date"),
+        "earliest_start_date",
+    ),
+    (("first generation", "first gen"), "first_generation_student"),
+    (("financial need", "need based"), "financial_need_eligible"),
+    (("gre score", "gre"), "test_gre"),
+    (("sat score", "sat"), "test_sat"),
+    (("gat score", "gat"), "test_gat"),
+    (("gmat score", "gmat"), "test_gmat"),
+    (("emergency contact name", "emergency contact"), "emergency_contact_name"),
+    (
+        ("emergency contact phone", "emergency contact number", "emergency phone"),
+        "emergency_contact_phone",
+    ),
+    (
+        ("emergency contact relationship", "relationship to emergency"),
+        "emergency_contact_relationship",
+    ),
+]
+V2_KEYS = frozenset(key for _, key in SYNONYMS_V2) | frozenset(
+    f"referee_{i}_{k}"
+    for i in (1, 2, 3)
+    for k in ("name", "title", "department", "organization", "email", "phone", "relationship")
+)
+_REFEREE = re.compile(
+    r"\b(referee|recommender|reference|recommendation letter writer|recommendation)s?\b"
+    r"(?:\s*(?:no\s*)?(1|2|3|one|two|three))?"
+    r"|\b(first|second|third|1st|2nd|3rd)\s+(referee|recommender|reference)\b"
+)
+_ORDINALS = {
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "1st": 1,
+    "2nd": 2,
+    "3rd": 3,
+}
+_REFEREE_PARTS: list[tuple[tuple[str, ...], str]] = [
+    (("email", "e mail"), "email"),
+    (("phone", "mobile", "contact number", "telephone"), "phone"),
+    (("job title", "position", "designation", "title"), "title"),
+    (("department", "faculty"), "department"),
+    (
+        ("institution", "organization", "organisation", "university", "affiliation", "employer"),
+        "organization",
+    ),
+    (("relationship", "how do you know", "capacity"), "relationship"),
+    (("full name", "name"), "name"),
+]
+
+
+def match_referee_key(label: str) -> str | None:
+    """ "Referee 2 Email" / "Second recommender's institution" -> referee_2_email."""
+    norm = normalize_label(label)
+    m = _REFEREE.search(norm)
+    if not m:
+        return None
+    word = m.group(2) or m.group(3) or "1"
+    index = _ORDINALS.get(word, 1)
+    for phrases, part in _REFEREE_PARTS:
+        if any(_contains(norm, p) for p in phrases):
+            return f"referee_{index}_{part}"
+    return None
+
+
 DOC_KEYWORDS: list[tuple[tuple[str, ...], DocKind]] = [
     (("cv", "resume", "curriculum vitae", "résumé"), DocKind.CV),
     (("transcript", "academic record", "marksheet", "grade report"), DocKind.TRANSCRIPT),
@@ -124,12 +300,23 @@ def _contains(haystack: str, phrase: str) -> bool:
 
 
 def match_profile_key(label: str) -> str | None:
+    referee = match_referee_key(label)
+    if referee is not None:
+        return referee
     norm = normalize_label(label)
+    if norm == "state" or (norm.startswith("state ") and len(norm.split()) <= 3):
+        return "state_or_province"
     best: tuple[int, str] | None = None
-    for phrases, key in SYNONYMS:
+    for phrases, key in SYNONYMS + SYNONYMS_V2:
         for phrase in phrases:
             if _contains(norm, phrase) and (best is None or len(phrase) > best[0]):
                 best = (len(phrase), key)
+    if (
+        best
+        and best[1] == "secondary_school_qualification"
+        and re.search(r"\b(gpa|cgpa|percentage|percent|marks|grades?|score|result)\b", norm)
+    ):
+        return "secondary_school_percentage"
     return best[1] if best else None
 
 
@@ -186,6 +373,8 @@ class FieldMapper:
     essay: EssayWriter
     known: dict[str, FieldResolution] = field(default_factory=dict)
     evidence: EvidenceLookup | None = None  # unified CV / transcript / essay / memory RAG
+    # Tier 1 (Teach Mode): normalized label / field name -> the profile fact the student used.
+    learned: dict[str, str] = field(default_factory=dict)
 
     async def resolve(self, f: FormField) -> FieldResolution:
         # 0. settled values (the student's answers, or values from earlier runs) win.
@@ -197,15 +386,23 @@ class FieldMapper:
         ):
             return settled
 
+        # 0b. what the student taught on this portal (labels no synonym list knows)
+        taught = self.learned.get(normalize_label(f.label)) or self.learned.get(f.key.lower())
+        if taught and f.field_type != "file" and self.facts.get(taught):
+            value = match_option(self.facts[taught], f.options, taught)
+            if value is not None:
+                return FieldResolution(
+                    f.key, value, FieldSource.PROFILE, PROFILE_CONFIDENCE, note=f"taught:{taught}"
+                )
+
         # 1. profile synonyms (skipped for essay prompts, file inputs)
         if f.field_type != "file" and not is_essay_field(f):
             key = match_profile_key(f.label) or match_profile_key(f.key.replace("_", " "))
             if key and self.facts.get(key):
                 value = match_option(self.facts[key], f.options, key)
                 if value is not None:
-                    return FieldResolution(
-                        f.key, value, FieldSource.PROFILE, PROFILE_CONFIDENCE, note=key
-                    )
+                    confidence = PROFILE_V2_CONFIDENCE if key in V2_KEYS else PROFILE_CONFIDENCE
+                    return FieldResolution(f.key, value, FieldSource.PROFILE, confidence, note=key)
 
         # 2. document slots
         if f.field_type == "file":

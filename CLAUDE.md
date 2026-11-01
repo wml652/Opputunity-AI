@@ -59,9 +59,78 @@ Layers, top to bottom. A layer may import only layers below it.
   (`AutoStageCampaign`) until each of the campaign's staged applications has left the filler,
   then `AWAITING_OK` (if any is ready) and only then `COMPLETED`.
 - The filler fills ONLY the application form: search, newsletter, lead-capture / counselling,
-  comment and contact forms are excluded by `SCOPE_JS` and never receive student data. From an
-  overview / directory page it follows at most `MAX_ENTRY_HOPS` (2) high-confidence "Apply now" /
-  "Official website" links (fill and submit replay alike); the checkpoint stores the form URL.
+  comment and contact forms (with or without a `<form>` tag) are excluded by `SCOPE_JS` and
+  never receive student data; their buttons are never Next / Submit, and a Submit button with no
+  application field filled is not a final step.
+- Aggregator / blog hosts (`domain.discovery.listing.AGGREGATOR_DOMAINS` + setting
+  `AGGREGATOR_DOMAINS`) are navigation-only: the filler never scans for filling or types there
+  (checked again inside `_fill`); its only action is following an off-site official link.
+  Discovery appends the page's outbound official links (`OUTBOUND_HEADING` section, always kept
+  by the RAG filter) and `resolve_portal_url` replaces aggregator / missing portal URLs;
+  `POST /opportunities/repair-portals` re-resolves existing queued / blocked applications.
+- Portal pathfinder: at most `MAX_ENTRY_HOPS` (4) goal-directed hops (entry CTAs > official
+  links > "How to apply" / "Admissions" / "Open roles"), visited-set guarded, following new-tab
+  links in the same tab, switching to `window.open` popups, entering ATS iframes and waiting for
+  SPA hydration. Without a form the page is classified (`PortalGate`) and stored as
+  `last_error = "[GATE] reason"`: sign-in wall (checkpoint on the sign-in page; Unblock opens
+  it), email / package only (a statement-of-purpose draft is generated; nothing is emailed),
+  applications closed (quoted), aggregator without official link, no form.
+- Streaming auto-apply: with `auto_stage` on, an application is started the moment it is
+  queued (eligible + `match_score >= STREAM_MIN_SCORE` + a portal, up to `auto_stage_limit`);
+  the application runner's semaphore (`MAX_PARALLEL_FILLS`, 2) bounds browsers. The end-of-
+  campaign pass (`AutoStageCampaign(already=...)`) tops up and waits. Never submits.
+- Portal fallback: an aggregator / missing / dead portal triggers ONE web search
+  (`OfficialPortalSearch`, `pick_official_search_hit`: never aggregator / social / ad hosts, must
+  name the opportunity) before / once after a dead-end fill and in the queue repair.
+- Live viewport: the filler reports steps through a per-run `ContextVar` telemetry (never field
+  values) -> `application.live_step` events (throttled) + JPEG frames in `ILiveFrameStore`
+  (in-memory, per user, LRU) served at `GET /applications/{id}/live-frame`.
+- Profile v2: non-PII depth (semester, English / MOI, tests, research, work mode, visa / passport
+  / financial-need flags) lives in `student_profiles.details` and may reach the user's model;
+  city, postal code, gender, links (LinkedIn / GitHub / portfolio / ORCID), emergency contact and
+  referees 1-3 are PII keys inside the encrypted PII document (`PII_V2_FIELDS`) and never do.
+  v2 form labels map deterministically at `PROFILE_V2_CONFIDENCE` (0.95).
+- Agent brain (`domain.agent`, table `agent_workflows`, RLS): Teach Mode
+  (`TeachAgentSession`, `POST /applications/{id}/teach`, `PlaywrightTeachRecorder`) records the
+  user's own clicks / navigation / field values in a VISIBLE browser. Passwords are never
+  recorded (dropped in the page). On finish: the route to the form becomes the portal's
+  workflow; custom answers go to `knowledge_memory_qa`; personal fields (PII_FACT_KEYS, incl.
+  profile v2 PII) are stored only as `mapped_profile_path`, never as values; answers containing
+  personal data are not memorised. A self-submitted form (confirmation page) may be recorded as
+  SUBMITTED only with `Actor.USER` (`SELF_SUBMIT_FROM`); the agent itself still never submits
+  without the human OK. Portal sign-in captures wait until the user closes the window.
+- Autonomous fills: cookie-banner dismissal -> replay of the learned path (multi-strategy
+  locators) -> deterministic pathfinder -> LLM navigator (`llm_navigator`, the user's chat model,
+  at most `MAX_LLM_STEPS`) on a PII-redacted snapshot. Inside a form the filler refuses to click
+  anything matching `FINAL_WORDS`: "reached final review" stops at AWAITING_FINAL_VERIFICATION.
+- A CAPTCHA blocks only when a challenge widget is VISIBLE (`CAPTCHA_JS`); invisible reCAPTCHA
+  v3 / Turnstile scripts are ignored.
+- LLM gateway: reasoning models - `<think>` blocks are stripped, JSON in `reasoning_content` is
+  used when `content` is empty, and an empty `finish_reason=length` reply retries once with more
+  headroom. NIM 404 / 422 / 429 errors carry actionable hints. The model picker shows the
+  categorised catalog from `GET {base_url}/models` (`domain.llm.catalog`, name heuristics only);
+  every slot (chat, extraction, embedding, rerank, vision) is edited in place via PATCH.
+- Tests never reach real search engines (`NoWebSearch` default in `tests/conftest.py`).
+- Agent decision tiers: Tier 1 (no model) - deterministic profile synonyms + the field mappings
+  taught on the portal (`FieldMapper.learned`) + replay of the taught route; Tier 2 (DOM-RAG) -
+  the page's DOM accessibility signature (`domain.training.models.DomState`) is embedded and the
+  top-3 most similar taught / successful steps from ANY portal are recalled; a demonstration
+  with similarity >= `RAG_ACT_SIMILARITY` is acted on by visible label (never CSS) without the
+  LLM; Tier 3 - the user's model with those demonstrations as few-shot examples. Essays are
+  synthesized only when an essay field is on the page.
+- `agent_trajectories` (RLS, `vector(1024)` + HNSW): every Teach Mode step and every
+  autonomous decision (`auto_success` / `auto_failure` by run outcome) + backfill. A Teach step
+  on a page where the bot's decision failed is stored with `rejected_action` (DPO pair).
+- Training data privacy: signatures and actions are tokenized (`tokenize_pii`: known values ->
+  `{{PROFILE.*}}`, other e-mails / phones / URLs / ID numbers -> `{{PII.*}}`) BEFORE embedding
+  or storage, re-tokenized at export with the current profile, and every exported record is
+  re-checked with `leaks()` - a leaking record is dropped (`X-Dropped-Records`), never exported.
+  Values are symbolic (`value_token`), so SFT / DPO files can be published.
+- The cloud QLoRA kit lives in `training/` (Unsloth + TRL SFT / DPO, eval metrics, HF push,
+  vLLM endpoint); the base model is a user-supplied parameter - no default is shipped.
+- Ranking (`domain.discovery.ranking`): 0-100 = eligibility 40 + alignment 25 + portal 20 +
+  urgency 15, computed on read (never stored); `sort=match|deadline|title|status&order=asc|desc`
+  on `/opportunities`, `/applications`, `/applications/queue`.
 - Campaign progress (`domain.discovery.progress.campaign_progress`) is a pure function of phase
   + counters; the runner streams it as throttled `campaign.progress` events and the API returns
   it on every campaign. Overall reaches 100% only at `COMPLETED`.

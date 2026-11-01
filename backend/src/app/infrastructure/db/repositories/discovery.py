@@ -497,6 +497,15 @@ class SqlOpportunityRepository:
             .values(latest_outcome=outcome, updated_at=func.now())
         )
 
+    async def set_portal_url(
+        self, user_id: uuid.UUID, opportunity_id: uuid.UUID, portal_url: str
+    ) -> None:
+        await self._s.execute(
+            update(OpportunityRow)
+            .where(OpportunityRow.user_id == user_id, OpportunityRow.id == opportunity_id)
+            .values(portal_url=portal_url[:2000], updated_at=func.now())
+        )
+
     async def counts(self, user_id: uuid.UUID) -> dict[str, int]:
         row = (
             await self._s.execute(
@@ -582,6 +591,7 @@ def _app(r: ApplicationRow) -> Application:
         created_at=r.created_at,
         updated_at=r.updated_at,
         version=r.version,
+        last_error=r.last_error,
     )
 
 

@@ -21,7 +21,7 @@ from app.domain.essay.synthesis import EssayDraft
 from app.domain.notification.models import Notification, NotificationChannel
 from app.domain.notification.signatures import verify_meta_signature, verify_twilio_signature
 from app.domain.shared.enums import NotifChannel, NotifStatus
-from app.domain.shared.errors import AuthenticationError
+from app.domain.shared.errors import AuthenticationError, NotFoundError
 
 router = APIRouter(tags=["applications"])
 
@@ -174,6 +174,7 @@ class ApplicationOut(BaseModel):
     priority_rank: int | None
     deadline_at: datetime | None
     version: int
+    last_error: str | None = None
 
     @staticmethod
     def of(a: Application) -> ApplicationOut:
@@ -183,6 +184,7 @@ class ApplicationOut(BaseModel):
             priority_rank=a.priority_rank,
             deadline_at=a.deadline_at,
             version=a.version,
+            last_error=a.last_error,
         )
 
 
@@ -450,6 +452,84 @@ async def batch_prepare(body: BatchIn, user_id: CurrentUserId, container: Contai
     """Fill the top-N queued applications up to the final OK gate. Never submits."""
     result = await container.applications.batch.execute(user_id, body.limit)
     return BatchOut(started=result.started, skipped_no_portal=result.skipped_no_portal)
+
+
+@router.get("/applications/{application_id}/live-frame")
+async def live_frame(
+    application_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> Response:
+    """Latest live-viewport JPEG of a running fill / submit (owner only; `?t=` busts caches)."""
+    seq, frame = container.applications.live_frame.execute(user_id, application_id)
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store", "X-Frame-Seq": str(seq)},
+    )
+
+
+class TeachOut(BaseModel):
+    application_id: uuid.UUID
+    url: str
+
+
+@router.post(
+    "/applications/{application_id}/teach",
+    response_model=TeachOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def teach(
+    application_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> TeachOut:
+    """Teach Mode: a visible browser opens at the portal; the agent records what you do and
+    keeps the route, your answers (as memory) and the session when you finish."""
+    started = await container.applications.teach.execute(user_id, application_id)
+    return TeachOut(application_id=started.application_id, url=started.url)
+
+
+@router.post("/applications/{application_id}/teach/finish", status_code=status.HTTP_204_NO_CONTENT)
+async def teach_finish(
+    application_id: uuid.UUID, user_id: CurrentUserId, container: Container
+) -> Response:
+    """'Finish training & save to brain' from the console."""
+    await container.applications.detail.execute(user_id, application_id)  # ownership check
+    if not container.applications.teach.finish(application_id):
+        raise NotFoundError("no Teach Mode window is open for this application")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class WorkflowOut(BaseModel):
+    id: uuid.UUID
+    domain: str
+    ats_type: str
+    navigation_steps: list[dict[str, Any]]
+    field_count: int
+    learned_answers: int
+    times_used: int
+    success_count: int
+    updated_at: datetime | None
+
+
+@router.get("/agent/workflows", response_model=list[WorkflowOut])
+async def agent_workflows(user_id: CurrentUserId, container: Container) -> list[WorkflowOut]:
+    """What the agent brain has learned, per portal (no personal values are stored)."""
+    workflows = await container.applications.teach.workflows(user_id)
+    return [
+        WorkflowOut(
+            id=w.id,
+            domain=w.domain,
+            ats_type=w.ats_type.value,
+            navigation_steps=[
+                {"kind": s.kind.value, "name": s.locator.name, "url": s.url}
+                for s in w.navigation_steps
+            ],
+            field_count=len(w.field_mappings),
+            learned_answers=sum(1 for m in w.field_mappings if m.memory_qa_id),
+            times_used=w.times_used,
+            success_count=w.success_count,
+            updated_at=w.updated_at,
+        )
+        for w in workflows
+    ]
 
 
 class UnblockOut(BaseModel):

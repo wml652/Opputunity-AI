@@ -7,6 +7,7 @@ from typing import Self
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.infrastructure.db.repositories.agent import SqlAgentWorkflowRepository
 from app.infrastructure.db.repositories.applications import (
     SqlApplicationDetailRepository,
     SqlChannelRepository,
@@ -38,6 +39,7 @@ from app.infrastructure.db.repositories.sessions import (
     SqlBrowserSessionRepository,
     SqlSearchCredentialRepository,
 )
+from app.infrastructure.db.repositories.training import SqlTrajectoryRepository
 from app.infrastructure.db.repositories.vault import (
     SqlDocumentChunkRepository,
     SqlDocumentRepository,
@@ -109,6 +111,8 @@ class SqlAlchemyUnitOfWork:
         self.search_credentials = SqlSearchCredentialRepository(session)
         self.verifications = SqlFinalVerificationRepository(session)
         self.document_chunks = SqlDocumentChunkRepository(session)
+        self.agent_workflows = SqlAgentWorkflowRepository(session)
+        self.trajectories = SqlTrajectoryRepository(session)
         return self
 
     async def __aexit__(

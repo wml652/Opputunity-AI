@@ -27,15 +27,18 @@ async def saved_portal_state(
     now: datetime,
     user_id: uuid.UUID,
     portal_url: str,
+    *also: str,
 ) -> tuple[str | None, datetime | None]:
     """(storage_state JSON, capture time) of the unexpired PORTAL + CHALLENGE sessions for the
-    portal's domain (a PORTAL login overrides CHALLENGE cookies), or (None, None)."""
-    domain = portal_domain(portal_url)
-    if not domain:
+    portal's domain and for `also` URLs (e.g. the official sign-in page a checkpoint stopped
+    at); a PORTAL login overrides CHALLENGE cookies. (None, None) if there is none."""
+    domains = list(dict.fromkeys(d for d in map(portal_domain, (portal_url, *also)) if d))
+    if not domains:
         return None, None
     async with uow_factory(user_id) as uow:
         found = [
             await uow.browser_sessions.find(user_id, domain, kind)
+            for domain in domains
             for kind in (SessionKind.CHALLENGE, SessionKind.PORTAL)
         ]
     state: str | None = None

@@ -53,7 +53,7 @@ class FakeCapturer:
     def __init__(self) -> None:
         self.urls: list[str] = []
 
-    async def capture(self, url: str, *, timeout_s: float) -> str:
+    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
         self.urls.append(url)
         return json.dumps({"cookies": [{"name": "cf_clearance", "value": "ok"}], "origins": []})
 

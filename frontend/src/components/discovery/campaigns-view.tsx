@@ -9,6 +9,7 @@ import { cn, formatRelative } from "@/lib/cn";
 import { useCampaign, useCampaigns, useCancelCampaign } from "@/lib/discovery-queries";
 import type { CampaignT } from "@/lib/discovery-schemas";
 
+import { LiveApplicationDock } from "@/components/pipeline/live-application-dock";
 import { ProgressBars } from "@/components/pipeline/progress-bars";
 
 import { CampaignLauncher } from "./campaign-launcher";
@@ -85,6 +86,7 @@ export function CampaignsView() {
         </Panel>
         <CampaignDetail id={active} />
       </div>
+      <LiveApplicationDock />
     </div>
   );
 }

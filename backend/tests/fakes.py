@@ -48,8 +48,30 @@ def _one_opportunity(block: str) -> dict[str, object] | None:
             "gpa_scale": scale,
             "nationalities": nats,
             "other_criteria": [fields["other"]] if "other" in fields else [],
+            **_v2_rules(fields),
         },
     }
+
+
+def _v2_rules(fields: dict[str, str]) -> dict[str, object]:
+    """Profile v2 criteria lines: "English: IELTS 6.5", "MOI: accepted", "Visa sponsorship: no",
+    "Passport: required", "Research areas: robotics, vision", "Work mode: remote"."""
+    out: dict[str, object] = {}
+    if "english" in fields:
+        test, _, score = fields["english"].partition(" ")
+        if score.replace(".", "", 1).isdigit():
+            out["english_tests"] = {test.upper(): float(score)}
+    if "moi" in fields:
+        out["moi_accepted"] = not fields["moi"].lower().startswith("not")
+    if "visa sponsorship" in fields:
+        out["visa_sponsorship"] = fields["visa sponsorship"].lower() in ("yes", "provided")
+    if "passport" in fields:
+        out["requires_passport"] = fields["passport"].lower() == "required"
+    if "research areas" in fields:
+        out["research_areas"] = [a.strip() for a in fields["research areas"].split(",")]
+    if "work mode" in fields:
+        out["work_mode"] = fields["work mode"].upper()
+    return out
 
 
 TITLE_SPLIT = re.compile(r"(?=^\s*(?:[-*]\s*)?Title:)", re.M)
@@ -89,6 +111,27 @@ def _evidence_reply(user: str) -> str:
                     }
                 )
     return json.dumps({"answerable": False, "answer": "", "confidence": 0.0, "evidence_ids": []})
+
+
+# Labels a pattern-matching filler cannot understand; the fake "model" knows what they mean.
+NAV_ADVANCE = ("begin my journey", "onwards", "let's go", "carry on")
+
+
+def _nav_reply(user: str) -> str:
+    """Navigator decisions like a sensible model: report the final review, accept a cookie
+    banner, click an element that moves the application forward, else give up."""
+    if "review your answers" in user.lower():
+        return json.dumps({"action": "reached_final_review", "index": None, "reason": "review"})
+    for line in user.splitlines():
+        m = re.match(r"\[(\d+)\] \([^)]*\) (.+)$", line.strip())
+        if not m:
+            continue
+        label = m.group(2).lower()
+        if "[banner/dialog]" in label and ("accept" in label or "agree" in label):
+            return json.dumps({"action": "dismiss_cookie_banner", "index": int(m.group(1))})
+        if any(word in label for word in NAV_ADVANCE):
+            return json.dumps({"action": "click", "index": int(m.group(1)), "reason": "advance"})
+    return json.dumps({"action": "give_up", "index": None, "reason": "nothing relevant"})
 
 
 def _fuzzy_reply(user: str) -> str:
@@ -155,6 +198,8 @@ class FakeLLM:
                     + ESSAY_TEXT
                 )
             )
+        elif "You operate a web browser" in system:
+            text = _nav_reply(user)
         elif "List claims in <essay>" in system:
             text = '{"unsupported_claims": []}'
         else:

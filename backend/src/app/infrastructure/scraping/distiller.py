@@ -11,7 +11,12 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 
-from app.domain.discovery.listing import HarvestedCard, PageKind
+from app.domain.discovery.listing import (
+    HarvestedCard,
+    PageKind,
+    best_outbound_links,
+    outbound_markdown,
+)
 from app.domain.ports.discovery import ProcessedPage
 from app.infrastructure.scraping.sanitizer import clean_text, sanitize_html
 from app.infrastructure.scraping.segmenter import ListingSegmenter
@@ -76,8 +81,9 @@ class HtmlContentProcessor:
     walker as fallback). Hub/listing pages additionally run the DOM card segmenter, whose
     `[Title](URL) | Deadline | snippet` lines are appended so links and deadlines survive."""
 
-    def __init__(self) -> None:
+    def __init__(self, aggregator_domains: frozenset[str] = frozenset()) -> None:
         self._segmenter = ListingSegmenter()
+        self._aggregators = aggregator_domains
 
     def process(self, html: str, url: str) -> ProcessedPage:
         soup, flags = sanitize_html(html)
@@ -125,7 +131,20 @@ class HtmlContentProcessor:
             markdown = _compose(None, prose, analysis.cards)
         else:
             markdown = prose
-        markdown = clean_text(_BLANKS.sub("\n\n", markdown)).strip()[:MAX_MARKDOWN_CHARS]
+        markdown = clean_text(_BLANKS.sub("\n\n", markdown)).strip()
+        outbound = []
+        if analysis.kind != PageKind.LISTING:
+            anchors = [
+                (urljoin(url, str(a["href"]).strip()), " ".join(a.get_text(" ").split()))
+                for a in soup.find_all("a", href=True)
+            ]
+            outbound = best_outbound_links(anchors, url, self._aggregators)
+        # The official links go last but always survive truncation (and the in-page RAG filter
+        # pins the section), so the extractor can see the real application URL.
+        section = outbound_markdown(outbound)
+        markdown = markdown[: MAX_MARKDOWN_CHARS - len(section) - 2]
+        if section:
+            markdown = f"{markdown}\n\n{section}"
         return ProcessedPage(
             title=title or None,
             markdown=markdown,
@@ -133,6 +152,7 @@ class HtmlContentProcessor:
             injection_flags=flags,
             kind=analysis.kind,
             cards=analysis.cards,
+            outbound_links=outbound,
             diagnostics={
                 **analysis.stats,
                 "prose_chars": len(prose),

@@ -30,7 +30,9 @@ class PlaywrightSessionCapturer:
     def __init__(self, guard: SsrfGuard) -> None:
         self._guard = guard
 
-    async def capture(self, url: str, *, timeout_s: float) -> str:
+    async def capture(self, url: str, *, timeout_s: float, wait_for_close: bool = False) -> str:
+        """`wait_for_close`: portal sign-ins - keep the window open until the USER closes it
+        (signing in takes time); cookies are snapshotted while it is open."""
         await self._guard.validate(url)
         from playwright.async_api import async_playwright
 
@@ -52,7 +54,20 @@ class PlaywrightSessionCapturer:
                 await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             deadline = time.monotonic() + timeout_s
             linkedin = "linkedin.com" in url
+            snapshot: str | None = None
             while time.monotonic() < deadline:
+                if wait_for_close:
+                    open_pages = [p for p in context.pages if not p.is_closed()]
+                    if not open_pages:
+                        if snapshot is None:
+                            raise SessionCaptureError(
+                                "the window was closed before any page loaded"
+                            )
+                        return snapshot
+                    with contextlib.suppress(Exception):
+                        snapshot = json.dumps(await context.storage_state())
+                    await asyncio.sleep(POLL_S)
+                    continue
                 if page.is_closed():
                     raise SessionCaptureError("the browser window was closed before it was usable")
                 if await self._usable(page, context, linkedin):
@@ -60,6 +75,8 @@ class PlaywrightSessionCapturer:
                     await asyncio.sleep(1.0)
                     return json.dumps(await context.storage_state())
                 await asyncio.sleep(POLL_S)
+            if wait_for_close and snapshot is not None:
+                return snapshot
             raise SessionCaptureError(f"not completed within {int(timeout_s)} s")
         finally:
             with contextlib.suppress(Exception):

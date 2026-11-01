@@ -116,6 +116,45 @@ export function useUnblockApplication() {
   });
 }
 
+const portalRepairSchema = z.array(
+  z.object({
+    opportunity_id: z.string().uuid(),
+    title: z.string(),
+    old_url: z.string(),
+    new_url: z.string().nullable(),
+    reason: z.string(),
+  }),
+);
+export type PortalRepairT = z.infer<typeof portalRepairSchema>;
+
+/** Re-resolve aggregator / blog portal URLs of queued and blocked applications to the official
+ * application link found on the page. */
+export function useRepairPortals() {
+  const invalidate = useInvalidateApplications();
+  return useMutation({
+    mutationFn: () => api("/api/v1/opportunities/repair-portals", { method: "POST", schema: portalRepairSchema }),
+    onSuccess: invalidate,
+  });
+}
+
+const teachSchema = z.object({ application_id: z.string().uuid(), url: z.string() });
+
+/** Teach Mode: open the portal in a visible browser and record a demonstration. */
+export function useTeach() {
+  return useMutation({
+    mutationFn: (applicationId: string) =>
+      api(`/api/v1/applications/${applicationId}/teach`, { method: "POST", schema: teachSchema }),
+  });
+}
+
+export function useFinishTeach() {
+  const invalidate = useInvalidateApplications();
+  return useMutation({
+    mutationFn: (applicationId: string) => api(`/api/v1/applications/${applicationId}/teach/finish`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+}
+
 export function useAnswerQuestion() {
   const invalidate = useInvalidateApplications();
   return useMutation({

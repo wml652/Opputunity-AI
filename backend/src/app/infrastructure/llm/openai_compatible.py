@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Sequence
 
@@ -15,6 +16,34 @@ from app.infrastructure.llm.rate_limiter import RateLimiterRegistry, SlidingWind
 from app.infrastructure.logging import get_logger
 
 log = get_logger(__name__)
+
+
+REASONING_MAX_TOKENS = 8_192
+_THINK = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def visible_answer(content: str, reasoning: str = "") -> str:
+    """The answer without chain-of-thought: strips <think>...</think> blocks (and an unclosed
+    leading <think>); if the model put everything in `reasoning_content` and left `content`
+    empty, fall back to a JSON object found there."""
+    text = _THINK.sub("", content)
+    if "<think>" in text.lower():
+        text = text[: text.lower().index("<think>")]
+    text = text.strip()
+    if text or not reasoning:
+        return text
+    source = _THINK.sub("", reasoning)
+    start, end = source.rfind("{"), source.rfind("}")
+    if start >= 0 and end > start:
+        # The last complete JSON object in the reasoning is the model's intended answer.
+        depth, i = 0, end
+        while i >= 0:
+            depth += source[i] == "}"
+            depth -= source[i] == "{"
+            if depth == 0:
+                return source[i : end + 1]
+            i -= 1
+    return ""
 
 
 class OpenAICompatibleProvider:
@@ -50,6 +79,7 @@ class OpenAICompatibleProvider:
         *,
         max_tokens: int = 1024,
         temperature: float = 0.2,
+        headroom_retry: bool = False,
     ) -> Completion:
         body = await self._client.request(
             "POST",
@@ -67,8 +97,18 @@ class OpenAICompatibleProvider:
         message = choice.get("message") or {}
         usage = body.get("usage") or {}
         reasoning = message.get("reasoning_content") or message.get("reasoning")
+        text = visible_answer(str(message.get("content") or ""), str(reasoning or ""))
+        if not text and choice.get("finish_reason") == "length" and not headroom_retry:
+            # Reasoning ("thinking") models spend the budget on reasoning first: one retry with
+            # more headroom instead of an empty answer.
+            return await self.complete(
+                messages,
+                max_tokens=min(max(max_tokens * 4, 1024), REASONING_MAX_TOKENS),
+                temperature=temperature,
+                headroom_retry=True,
+            )
         return Completion(
-            text=str(message.get("content") or ""),
+            text=text,
             model=str(body.get("model") or self._model),
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),

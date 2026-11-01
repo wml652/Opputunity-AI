@@ -153,7 +153,13 @@ def settings(tmp_path: Path, portal: Portal, fake_portal: FakePortalServer) -> S
     return Settings(
         storage_dir=str(tmp_path / "storage"),
         logs_dir=str(tmp_path / "logs"),
-        scraper_test_fixture_hosts=[portal.host, fake_portal.host],
+        scraper_test_fixture_hosts=[
+            portal.host,
+            fake_portal.host,
+            fake_portal.agg_host,
+            fake_portal.b_host,
+        ],
+        aggregator_domains=["127.0.0.2"],  # the fake portal's aggregator mirror
         crawl_use_playwright=False,
         crawl_politeness_seconds=0.0,
         _env_file=None,  # type: ignore[call-arg]  # tests never read the developer's .env
@@ -221,6 +227,7 @@ async def infra(
     settings = settings.model_copy(update={"database_url": clean_db.app})
     built = build_infrastructure(settings, redis=redis, engine=engine, resolver=public_resolver)
     built.embedding_factory = embedding_factory  # type: ignore[assignment]
+    built.search_provider = NoWebSearch()  # tests never reach real search engines
     yield built
     await built.llm_factory.aclose()
 
@@ -231,6 +238,15 @@ async def client(infra: Infrastructure) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
+
+
+class NoWebSearch:
+    """Default web search in tests: offline (the official-portal fallback finds nothing)."""
+
+    name = "offline"
+
+    async def search(self, query: str, max_results: int) -> list[Any]:
+        return []
 
 
 class ApiUser:

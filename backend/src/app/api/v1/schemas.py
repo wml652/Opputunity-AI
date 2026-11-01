@@ -177,9 +177,18 @@ class FetchModelsRequest(BaseModel):
     api_key: SecretStr | None = Field(default=None, max_length=4096)
 
 
+class ModelInfoOut(BaseModel):
+    id: str
+    category: str  # chat | reasoning | fast | vision | embedding | rerank | other
+    publisher: str
+    chat_capable: bool
+
+
 class FetchModelsResponse(BaseModel):
     base_url: str
     models: list[str]
+    catalog: list[ModelInfoOut] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
 
 
 class VerifyRequest(BaseModel):
