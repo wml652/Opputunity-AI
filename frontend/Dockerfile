@@ -23,7 +23,7 @@ RUN mkdir -p public && pnpm build
 FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
-RUN groupadd --system app && useradd --system --gid app app
+RUN groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app app
 COPY --from=build --chown=app:app /app/.next/standalone ./
 COPY --from=build --chown=app:app /app/.next/static ./.next/static
 COPY --from=build --chown=app:app /app/public ./public

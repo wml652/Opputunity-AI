@@ -1,0 +1,161 @@
+# Build in the cloud, deploy to Azure Container Apps. Nothing heavy ever runs on a laptop:
+# images are built on GitHub's runners (Buildx + GitHub Actions layer cache) and pushed to
+# Azure Container Registry; the apps created by deploy/azure/provision-azure.sh are updated.
+#
+# One-time setup (printed - and set, if `gh` is logged in - by provision-azure.sh):
+#   secrets   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID   (OIDC, no passwords)
+#   variables AZURE_RESOURCE_GROUP, ACR_NAME, ACR_LOGIN_SERVER, APP_PREFIX, BACKEND_INTERNAL_URL
+name: Build and deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC login to Azure (federated credential on the deployer app)
+
+concurrency:
+  group: deploy-azure
+  cancel-in-progress: false # never interrupt a deployment halfway
+
+env:
+  APP_PREFIX: ${{ vars.APP_PREFIX || 'ootg' }}
+
+jobs:
+  checks:
+    name: Lint, types, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Backend (ruff, mypy --strict, import-linter, unit tests)
+        working-directory: backend
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy --strict src
+          uv run lint-imports
+          uv run pytest -q tests/unit
+
+      - uses: pnpm/action-setup@v4 # version from package.json "packageManager"
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Frontend (typecheck, lint)
+        run: |
+          pnpm -C frontend install --frozen-lockfile
+          pnpm -C frontend typecheck
+          pnpm -C frontend lint
+
+  build:
+    name: Build ${{ matrix.image }}
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: api
+            context: backend
+            file: backend/Dockerfile.api
+            build-args: ""
+          - image: worker
+            context: backend
+            file: backend/Dockerfile.worker
+            build-args: ""
+          - image: frontend
+            context: frontend
+            file: frontend/Dockerfile
+            # The /api rewrite target is baked in at build time (the API's internal address).
+            build-args: BACKEND_URL=${{ vars.BACKEND_INTERNAL_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Log in to Azure Container Registry
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64 # Azure Container Apps runs amd64
+          push: true
+          build-args: ${{ matrix.build-args }}
+          tags: |
+            ${{ vars.ACR_LOGIN_SERVER }}/${{ env.APP_PREFIX }}-${{ matrix.image }}:${{ github.sha }}
+            ${{ vars.ACR_LOGIN_SERVER }}/${{ env.APP_PREFIX }}-${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      REGISTRY: ${{ vars.ACR_LOGIN_SERVER }}
+      TAG: ${{ github.sha }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Update images (api first - it runs the migrations)
+        run: |
+          set -euo pipefail
+          az extension add --name containerapp --upgrade --only-show-errors
+          update() {
+            if ! az containerapp show -g "$RG" -n "$1" --output none --only-show-errors 2>/dev/null; then
+              # First push on a new subscription: the images exist now; the apps are created
+              # by running deploy/azure/provision-azure.sh a second time.
+              echo "::notice::$1 does not exist yet - run deploy/azure/provision-azure.sh again"
+              echo "skip_smoke=true" >> "$GITHUB_ENV"
+              return 0
+            fi
+            echo "::group::$1 <- $2"
+            az containerapp update --resource-group "$RG" --name "$1" --image "$2" \
+              --revision-suffix "g${TAG:0:7}" --only-show-errors --output none
+            echo "::endgroup::"
+          }
+          update "$APP_PREFIX-api" "$REGISTRY/$APP_PREFIX-api:$TAG"
+          for queue in system discovery browser; do
+            update "$APP_PREFIX-worker-$queue" "$REGISTRY/$APP_PREFIX-worker:$TAG"
+          done
+          update "$APP_PREFIX-frontend" "$REGISTRY/$APP_PREFIX-frontend:$TAG"
+      - name: Smoke test (console reachable, API ready through the console proxy)
+        if: env.skip_smoke != 'true'
+        run: |
+          set -euo pipefail
+          fqdn=$(az containerapp show -g "$RG" -n "$APP_PREFIX-frontend" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$fqdn/api/v1/ready" || true)
+            if [ "$code" = "200" ]; then
+              echo "ready: https://$fqdn"
+              exit 0
+            fi
+            echo "attempt $attempt: /api/v1/ready -> $code"
+            sleep 10
+          done
+          echo "::error::the API did not become ready behind https://$fqdn"
+          exit 1

@@ -9,15 +9,12 @@ import contextlib
 import asyncpg
 
 from app.application.events.use_cases import RelayOutbox
+from app.infrastructure.db.session import asyncpg_dsn
 from app.infrastructure.logging import get_logger
 
 log = get_logger(__name__)
 
 NOTIFY_CHANNEL = "pipeline_events"
-
-
-def asyncpg_dsn(sqlalchemy_url: str) -> str:
-    return sqlalchemy_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
 class OutboxRelayLoop:

@@ -127,3 +127,8 @@ def test_migration_runner_uses_a_plain_asyncpg_dsn() -> None:
 
     assert asyncpg_dsn("postgresql+asyncpg://o:p@db:5432/x") == "postgresql://o:p@db:5432/x"
     assert asyncpg_dsn("postgresql://o:p@db/x") == "postgresql://o:p@db/x"
+    # Azure Database for PostgreSQL: SQLAlchemy's `ssl` keyword becomes libpq's `sslmode`.
+    assert (
+        asyncpg_dsn("postgresql+asyncpg://o:p@h.postgres.database.azure.com:5432/x?ssl=require")
+        == "postgresql://o:p@h.postgres.database.azure.com:5432/x?sslmode=require"
+    )

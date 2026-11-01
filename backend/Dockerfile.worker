@@ -20,7 +20,7 @@ COPY --from=build /app/.venv /app/.venv
 # Chromium headless shell + its OS libraries (the version pinned by the locked playwright).
 RUN /app/.venv/bin/playwright install --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*
-RUN groupadd --system app && useradd --system --gid app --home /app app \
+RUN groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --home /app app \
     && mkdir -p /data/storage /data/logs && chown -R app:app /ms-playwright /data
 WORKDIR /app
 COPY --from=build --chown=app:app /app /app
