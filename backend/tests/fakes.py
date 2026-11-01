@@ -165,11 +165,16 @@ class FakeLLM:
     model: str
     calls: list[list[ChatMessage]] = field(default_factory=list)
     finish_reasons: list[str | None] = field(default_factory=list)
+    # (code, HTTP status): every call is refused like a revoked key / disabled model.
+    reject: tuple[ConnectionErrorCode, int] | None = None
 
     async def complete(
         self, messages: Sequence[ChatMessage], *, max_tokens: int = 1024, temperature: float = 0.2
     ) -> Completion:
         self.calls.append(list(messages))
+        if self.reject is not None:
+            code, status = self.reject
+            raise LLMHttpError(code, f"HTTP {status}: Forbidden", status)
         system = messages[0].content
         user = messages[-1].content
         finish: str | None = "stop"
@@ -224,13 +229,18 @@ class FakeLLMFactory:
     def __init__(self) -> None:
         self.http_client = httpx.AsyncClient()
         self.created: list[FakeLLM] = []
+        self.reject: tuple[ConnectionErrorCode, int] | None = None
 
     def create(
         self, *, base_url: str, api_key: str, model: str, rpm_limit: int | None = None
     ) -> FakeLLM:
-        llm = FakeLLM(model=model)
+        llm = FakeLLM(model=model, reject=self.reject)
         self.created.append(llm)
         return llm
+
+    @property
+    def call_count(self) -> int:
+        return sum(len(llm.calls) for llm in self.created)
 
     @property
     def models_used(self) -> set[str]:

@@ -6,7 +6,9 @@ from collections.abc import Awaitable, Callable
 
 from app.application.applications.submission import RunSubmission
 from app.application.applications.use_cases import RunApplication
+from app.domain.ports.system import ISystemResources
 from app.infrastructure.logging import get_logger
+from app.infrastructure.runtime.resources import wait_for_memory
 
 log = get_logger(__name__)
 
@@ -20,8 +22,12 @@ class InProcessApplicationRunner:
         submit: RunSubmission | None = None,
         *,
         max_parallel: int = 2,
+        resources: ISystemResources | None = None,
+        min_free_memory_mb: int = 0,
     ) -> None:
         self._run = run
+        self._resources = resources
+        self._min_free_mb = min_free_memory_mb
         self._submit = submit
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
         # Batch auto-stage may start many runs: at most `max_parallel` browsers at once.
@@ -60,6 +66,15 @@ class InProcessApplicationRunner:
     ) -> None:
         try:
             async with self._slots:
+                # Each run launches a Chromium: do not start one into an out-of-memory kill.
+                if self._resources is not None and self._min_free_mb > 0:
+                    enough = await wait_for_memory(self._resources, self._min_free_mb)
+                    if not enough:
+                        log.warning(
+                            "memory.low_starting_anyway",
+                            application_id=str(application_id),
+                            min_free_mb=self._min_free_mb,
+                        )
                 await job(user_id, application_id)
         except Exception:
             log.exception(

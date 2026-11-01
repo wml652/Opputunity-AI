@@ -26,6 +26,7 @@ from app.domain.discovery.listing import DedupeCandidate, is_near_duplicate
 from app.domain.discovery.models import AiPolicy, OpportunityExtract, dedupe_key
 from app.domain.discovery.playbook import ExtractionStrategy
 from app.domain.eligibility.rules import EligibilityRules, RuleResult, RuleSource, RuleStatus
+from app.domain.llm.provider import is_fatal
 from app.domain.ports.discovery import ExtractionResult
 from app.domain.ports.llm import ChatMessage, ILLMProvider
 from app.domain.shared.enums import OpportunityType
@@ -385,6 +386,8 @@ class LlmOpportunityExtractor:
                     attempt=attempt,
                 )
             except DomainError as exc:  # timeout / provider error / invalid JSON: this window only
+                if is_fatal(exc):
+                    raise  # key / model rejected: the other windows would fail the same way
                 failures += 1
                 attempt["error"] = exc.message
                 attempt["error_kind"] = type(exc).__name__

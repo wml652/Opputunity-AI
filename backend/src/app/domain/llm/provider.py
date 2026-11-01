@@ -93,6 +93,28 @@ class LLMProviderError(DomainError):
     code = "llm_provider_error"
 
 
+# The provider refused the key or the model: retrying, escalating or moving to the next page
+# cannot succeed, so callers stop at once (429 / timeouts / 5xx stay retryable).
+FATAL_CODES = frozenset(
+    {
+        ConnectionErrorCode.UNAUTHORIZED,
+        ConnectionErrorCode.FORBIDDEN,
+        ConnectionErrorCode.MODEL_NOT_FOUND,
+    }
+)
+
+
+def is_fatal(exc: BaseException) -> bool:
+    return isinstance(exc, LLMProviderError) and str(getattr(exc, "code", "")) in FATAL_CODES
+
+
+def provider_rejected_message(exc: DomainError) -> str:
+    return (
+        f"Model provider rejected the request ({exc.message[:300]}). "
+        "Check the API key and model in LLM Gateway, then restart the campaign."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HandshakeResult:
     ok: bool

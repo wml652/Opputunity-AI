@@ -197,6 +197,19 @@ Layers, top to bottom. A layer may import only layers below it.
   `SINGLE_WINDOW_CHARS` (6000) it is extracted in ONE call. Multi-opportunity pages keep every
   relevant section (never drop a listed opportunity to save tokens). Record a `RAG_FILTER` trace
   step with `rag_sections_total`, `rag_sections_kept`, `chars_saved_pct`, `scorer`.
+- Provider fail-fast: 401 / 403 / 404-410 (`domain.llm.provider.is_fatal`) are never retried,
+  escalated or recorded in a domain playbook. The window extractor stops at the first one;
+  `PROVIDER_FAIL_LIMIT` (3) in a row end the campaign FAILED with "Model provider rejected the
+  request ..."; the filler disables its navigator for the run (`[MODEL]` log line). 429,
+  timeouts and 5xx stay retryable.
+- Honest completion: `campaign_outcome` (pure, computed on read from `extract_done` /
+  `extract_failed` / `opportunities_found`) reports `ok | degraded | failed` on every finished
+  campaign's progress; a COMPLETED campaign that extracted nothing shows as failed in the UI.
+- Process health: `GET /api/v1/health` = liveness, `GET /api/v1/ready` = database + Redis probes
+  (503 when down) + free memory. Each fill waits up to 2 min for `MIN_FREE_MEMORY_MB` (1200)
+  before launching its browser. `scripts/launcher.py --supervise` (started by every launch,
+  stopped first by `--stop`) restarts a dead API / console, logging free memory, at most 3 times
+  per 10 min. Proactor `ConnectionResetError` callbacks are logged at DEBUG.
 - PDF opportunity URLs are fetched as documents (SSRF-checked per hop, 15 MB cap), parsed by
   `IDocumentLayoutParser` (`PDF_PARSE` step); low-text pages go to the vision model only when
   the user configured one (`VISION_PARSE` step).

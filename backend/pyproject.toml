@@ -25,6 +25,7 @@ dependencies = [
     "trafilatura>=2.0",
     "beautifulsoup4>=4.12",
     "ddgs>=9.0",
+    "psutil>=7.0",
 ]
 
 [project.scripts]

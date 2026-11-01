@@ -15,6 +15,7 @@ PAGES_BUDGET = "pages_budget"
 PAGES_FETCHED = "pages_fetched"
 EXTRACT_QUEUED = "extract_queued"
 EXTRACT_DONE = "extract_done"
+EXTRACT_FAILED = "extract_failed"
 STAGE_TARGET = "stage_target"
 STAGE_DONE = "stage_done"
 STAGE_READY = "stage_ready"
@@ -25,6 +26,10 @@ _FINAL = {"COMPLETED", "AWAITING_OK"}
 _STOPPED = {"FAILED", "CANCELLED"}
 WEIGHTS_WITH_STAGING = (0.4, 0.3, 0.3)
 WEIGHTS_WITHOUT_STAGING = (0.55, 0.45, 0.0)
+# Completion outcome: a finished campaign is "failed" when (nearly) every extraction failed and
+# nothing was found, "degraded" when a large share failed, otherwise "ok".
+FAILED_SHARE_PCT = 80
+DEGRADED_SHARE_PCT = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +55,8 @@ class CampaignProgress:
     staged: int
     stage_target: int
     auto_stage: bool
+    outcome: str | None = None  # ok | degraded | failed, once the campaign has finished
+    outcome_detail: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,6 +66,24 @@ def _pct(done: int, total: int, *, cap: float = 100.0) -> float:
     if total <= 0:
         return 0.0
     return round(min(cap, 100.0 * done / total), 1)
+
+
+def campaign_outcome(counters: Mapping[str, Any]) -> tuple[str, str | None]:
+    """How well a finished campaign actually worked (never stored; a pure function of counters)."""
+
+    def n(key: str) -> int:
+        value = counters.get(key, 0)
+        return int(value) if isinstance(value, int | float) else 0
+
+    done, failed, found = n(EXTRACT_DONE), n(EXTRACT_FAILED), n("opportunities_found")
+    if done <= 0 or failed <= 0:
+        return "ok", None
+    detail = f"{failed} of {done} pages failed extraction"
+    if found == 0 and failed * 100 >= FAILED_SHARE_PCT * done:
+        return "failed", detail
+    if failed * 100 > DEGRADED_SHARE_PCT * done:
+        return "degraded", detail
+    return "ok", detail
 
 
 def campaign_progress(
@@ -111,6 +136,8 @@ def campaign_progress(
         )
     )
 
+    outcome: str | None = None
+    outcome_detail: str | None = None
     if crawling:
         current = ProgressBar(
             "Crawling, extracting and evaluating", detail, fetched, budget, crawl_pct
@@ -122,7 +149,16 @@ def campaign_progress(
     elif phase == "FILLING":
         current = ProgressBar("Auto-filling applications", detail, staged, target, stage_pct)
     elif final:
-        label = "Awaiting your OK" if n(STAGE_READY) else "Completed"
+        outcome, outcome_detail = campaign_outcome(counters)
+        label = (
+            "Awaiting your OK"
+            if n(STAGE_READY)
+            else "Completed - nothing extracted"
+            if outcome == "failed"
+            else "Completed with errors"
+            if outcome == "degraded"
+            else "Completed"
+        )
         total = target if target else max(found, 1)
         current = ProgressBar(label, detail, total, total, 100.0)
     else:
@@ -142,4 +178,6 @@ def campaign_progress(
         staged=staged,
         stage_target=target,
         auto_stage=auto_stage,
+        outcome=outcome,
+        outcome_detail=outcome_detail,
     )

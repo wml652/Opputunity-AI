@@ -72,6 +72,7 @@ from app.domain.discovery.playbook import (
 )
 from app.domain.discovery.progress import (
     EXTRACT_DONE,
+    EXTRACT_FAILED,
     EXTRACT_QUEUED,
     PAGES_BUDGET,
     PAGES_FETCHED,
@@ -105,6 +106,7 @@ from app.domain.eligibility.rules import (
     profile_snapshot,
 )
 from app.domain.events.models import NewEvent
+from app.domain.llm.provider import is_fatal, provider_rejected_message
 from app.domain.ports.crypto import aad
 from app.domain.ports.discovery import (
     ISearchProvider,
@@ -145,6 +147,7 @@ VISION_INSTRUCTION = (
 MIN_FOLLOWABLE_CARDS = 3  # a listing with fewer followable cards is extracted directly
 KNOWN_TITLES_LIMIT = 2_000
 CANCEL_POLL_S = 0.5
+PROVIDER_FAIL_LIMIT = 3  # consecutive key / model rejections that fail the campaign
 PROGRESS_INTERVAL_S = 1.5
 # Streaming auto-apply only starts applications that are also a good match (0-100).
 STREAM_MIN_SCORE = 50
@@ -192,6 +195,9 @@ class CampaignRun:
         self.queue: asyncio.Queue[CrawledPage | None] = asyncio.Queue(maxsize=QUEUE_SIZE)
         self.cancelled = False
         self._last_cancel_check = 0.0
+        self.run_task: asyncio.Task[Any] | None = None
+        self.provider_fails = 0  # consecutive key / model rejections (the circuit breaker)
+        self.provider_error: str | None = None
         self.extract_llm: ILLMProvider | None = None
         self.primary_llm: ILLMProvider | None = None
         self.embedder: IEmbeddingProvider | None = None
@@ -291,6 +297,23 @@ class CampaignRun:
                     return
             except Exception as exc:  # noqa: BLE001 - a DB hiccup must not kill the watcher
                 self.log("cancel_watch_error", error=repr(exc)[:200])
+
+    # -- provider circuit breaker ----------------------------------------------------------------
+
+    def _provider_ok(self) -> None:
+        self.provider_fails = 0
+
+    def _provider_failed(self, exc: BaseException) -> bool:
+        """True when `exc` is a key / model rejection. PROVIDER_FAIL_LIMIT in a row stop the whole
+        campaign (FAILED, with the provider's message) instead of burning a call per page."""
+        if not is_fatal(exc) or not isinstance(exc, DomainError):
+            return False
+        self.provider_fails += 1
+        if self.provider_fails >= PROVIDER_FAIL_LIMIT and self.provider_error is None:
+            self.provider_error = provider_rejected_message(exc)
+            if self.run_task is not None:
+                self.run_task.cancel()
+        return True
 
     # -- playbooks -------------------------------------------------------------------------------
 
@@ -399,6 +422,7 @@ class CampaignRun:
         )
         run_task = asyncio.current_task()
         assert run_task is not None
+        self.run_task = run_task
         watcher = asyncio.create_task(self._watch_cancel(run_task))
         workers: list[asyncio.Task[None]] = []
         try:
@@ -424,6 +448,17 @@ class CampaignRun:
                 await asyncio.shield(self.save_playbooks())
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._persist_counters())
+            if self.provider_error is not None:
+                self.log(
+                    "provider_rejected", error=self.provider_error, counters=dict(self.counters)
+                )
+                await self._state(
+                    status=CampaignStatus.FAILED,
+                    phase=CampaignPhase.FAILED,
+                    error=self.provider_error[:500],
+                    finished_at=self.deps.clock.now(),
+                )
+                return
             self.log("cancelled", counters=dict(self.counters))
             if not self.cancelled:
                 raise  # app shutdown: the startup sweep marks the campaign interrupted
@@ -1301,6 +1336,7 @@ class CampaignRun:
             except Exception as exc:  # noqa: BLE001 - one page never stops a worker
                 self.log("extraction_error", worker=worker, url=page.url, error=repr(exc)[:300])
                 self.counters[EXTRACT_DONE] += 1
+                self.counters[EXTRACT_FAILED] += 1
                 page.status = CrawlStatus.FAILED
                 page.error_stage, page.error_code = Stage.LLM_EXTRACTION.value, "internal_error"
                 page.error = page.error_detail = f"extraction crashed: {type(exc).__name__}"
@@ -1324,6 +1360,7 @@ class CampaignRun:
             strategy = replace(strategy, chunk_chars=max(strategy.chunk_chars, len(markdown) + 1))
         result = None
         error: Exception | None = None
+        rejected = False
         for _ in range(3):
             await self.check_cancelled()
             with trace.step(
@@ -1344,8 +1381,9 @@ class CampaignRun:
                     error = exc
                     step.status = StepStatus.FAIL
                     step.detail |= {"error": exc.message, **getattr(exc, "diagnostics", {})}
-            if result is not None:
-                break
+                    rejected = self._provider_failed(exc)
+            if result is not None or rejected:
+                break  # a rejected key / model fails the same way at every strategy
             nxt = escalate_extraction(strategy)
             if nxt is None:
                 break
@@ -1372,17 +1410,22 @@ class CampaignRun:
             message = error.message if isinstance(error, DomainError) else "extraction failed"
             page.status, page.error_stage = CrawlStatus.FAILED, Stage.LLM_EXTRACTION.value
             page.error_code = (
-                "llm_truncated"
+                "llm_rejected"
+                if rejected
+                else "llm_truncated"
                 if "length" in message
                 else "llm_timeout"
                 if "timed out" in message
                 else "llm_invalid_json"
             )
             page.error, page.error_detail = f"extraction: {message}"[:500], message[:2000]
-            pb.record_failure(Stage.LLM_EXTRACTION, page.error_code, self.c.id)
-            self._touch(pb)
+            self.counters[EXTRACT_FAILED] += 1
+            if not rejected:  # the site is fine; never teach its playbook a provider outage
+                pb.record_failure(Stage.LLM_EXTRACTION, page.error_code, self.c.id)
+                self._touch(pb)
             await self.persist_page(page)
             return []
+        self._provider_ok()
         if strategy.level > pb.extraction.level:
             pb.extraction = strategy
             self._touch(pb)
@@ -1503,7 +1546,9 @@ class CampaignRun:
                     results += await self.deps.fuzzy.evaluate(
                         self.primary_llm, opp.eligibility.other_criteria, self.snapshot
                     )
+                    self._provider_ok()
                 except DomainError as exc:
+                    self._provider_failed(exc)
                     results += [
                         RuleResult(
                             c[:200],

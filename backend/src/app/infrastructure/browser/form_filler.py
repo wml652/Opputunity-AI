@@ -61,6 +61,7 @@ from app.domain.discovery.listing import (
     is_aggregator_host,
     score_outbound_link,
 )
+from app.domain.llm.provider import is_fatal
 from app.domain.ports.agent import DecisionSink, DomRecall, Navigator
 from app.domain.ports.applications import FillObserver, Resolver
 from app.domain.training.models import Demonstration, DomState
@@ -1166,7 +1167,12 @@ class PlaywrightFormFiller:
                     _format_snapshot(snap) + _demonstrations(demos), goal
                 )
             except Exception as exc:  # noqa: BLE001 - the model is optional help, never a crash
-                log_lines.append(f"agent navigator unavailable: {type(exc).__name__}")
+                if is_fatal(exc):  # key / model rejected: stop asking it for this run
+                    plan.navigator = None
+                    log_lines.append(f"[MODEL] {getattr(exc, 'message', exc)}"[:300])
+                    await _live(page, "Model rejected the request - check LLM Gateway", force=True)
+                else:
+                    log_lines.append(f"agent navigator unavailable: {type(exc).__name__}")
                 return "none", page
             await _live(
                 page, f"Agent decided: {decision.action.value.replace('_', ' ')}", force=True

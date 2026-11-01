@@ -98,7 +98,7 @@ from app.application.profile.use_cases import (
     SaveProfile,
     UploadDocument,
 )
-from app.application.system.use_cases import GetWorkerStatus
+from app.application.system.use_cases import CheckReadiness, GetWorkerStatus
 from app.application.training.service import (
     BackfillTrajectories,
     ExportTrainingData,
@@ -237,6 +237,7 @@ class ApiContainer:
     connection_status: GetConnectionStatus
     replay_events: ReplayEvents
     worker_status: GetWorkerStatus
+    readiness: CheckReadiness
     vault: VaultUseCases
     discovery: DiscoveryUseCases
     applications: ApplicationUseCases

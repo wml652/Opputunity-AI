@@ -3,13 +3,16 @@
     python scripts/launcher.py            start everything (idempotent) and open the browser
     python scripts/launcher.py --stop     stop the API and frontend
     python scripts/launcher.py --status   print what is running
+    python scripts/launcher.py --supervise  (internal) watch the API / console, restart on death
     python scripts/launcher.py --install  (re)create the Desktop / repo shortcuts and icon
 
 Boot sequence: configure PATH for uv/pnpm -> if the API and console already answer, just open
 the browser -> otherwise ensure the embedded PostgreSQL + migrations + dev settings
 (scripts/dev_bootstrap.py), start the API and Next.js dev server as detached background
 processes logging to .logs/, wait for both to return HTTP 200, self-heal a corrupted Next.js
-dev cache once, then open http://localhost:3000.
+dev cache once, then open http://localhost:3000. A detached supervisor then polls both every
+SUPERVISE_INTERVAL_S and restarts a dead one (logging free memory, the usual killer), at most
+MAX_RESTARTS times per RESTART_WINDOW_S before it gives up loudly.
 """
 
 from __future__ import annotations
@@ -34,9 +37,15 @@ LOGS = ROOT / ".logs"
 PIDS = LOGS / "pids.json"
 
 API_HEALTH = "http://127.0.0.1:8000/api/v1/health"
+API_READY = "http://127.0.0.1:8000/api/v1/ready"
 CONSOLE = "http://localhost:3000"
 API_PORT, WEB_PORT = 8000, 3000
 IS_WINDOWS = sys.platform == "win32"
+SUPERVISE_INTERVAL_S = 10.0
+DOWN_CHECKS = 3  # consecutive failed health checks before a restart (a busy API may stall)
+MAX_RESTARTS = 3
+RESTART_WINDOW_S = 600.0
+NEXT_MAX_OLD_SPACE_MB = 2048  # bound the dev server's heap (it grew until the OS killed it)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -135,7 +144,9 @@ def pids_on_port(port: int) -> set[int]:
                 pids.add(int(parts[4]))
     else:
         out = subprocess.run(
-            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True,
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
             check=False,
         ).stdout
         pids.update(int(p) for p in out.split() if p.isdigit())
@@ -162,8 +173,13 @@ def spawn(name: str, args: list[str], cwd: Path, env: dict[str, str]) -> int:
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(  # noqa: S603 - fixed argv
-        args, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL, **kwargs,  # type: ignore[arg-type]
+        args,
+        cwd=cwd,
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        **kwargs,  # type: ignore[arg-type]
     )
     record_pid(name, proc.pid)
     return proc.pid
@@ -185,9 +201,7 @@ def load_pids() -> dict[str, int]:
 
 def kill_tree(pid: int) -> None:
     if IS_WINDOWS:
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False
-        )
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
     else:
         try:
             os.killpg(pid, 15)
@@ -296,7 +310,11 @@ def start_frontend(env: dict[str, str], *, attempt: int = 1) -> None:
         say("clearing the Next.js dev cache (.next-dev)")
         shutil.rmtree(FRONTEND / ".next-dev", ignore_errors=True)
     say("starting console (Next.js) on :3000 - first compile takes ~30-60s")
-    spawn("web", [which("pnpm", env), "dev"], FRONTEND, env)
+    web_env = dict(env)
+    web_env["NODE_OPTIONS"] = (
+        f"{env.get('NODE_OPTIONS', '')} --max-old-space-size={NEXT_MAX_OLD_SPACE_MB}".strip()
+    )
+    spawn("web", [which("pnpm", env), "dev"], FRONTEND, web_env)
     wait_for(console_up, "console", timeout=240)
     if not console_assets_ok():
         if attempt >= 2:
@@ -349,6 +367,7 @@ def _start() -> None:
     env = build_env()
     if api_up() and console_up():
         say("OPPORTUNITIES ON THE GO is already running")
+        start_supervisor(env)
         open_browser()
         return
     bootstrap(env)
@@ -356,10 +375,15 @@ def _start() -> None:
     ensure_frontend_deps(env)
     start_frontend(env)
     open_browser()
+    start_supervisor(env)
     say("ready. Stop everything with 'Stop Mission Control'")
 
 
 def stop() -> None:
+    supervisor = load_pids().get("supervisor")
+    if supervisor:  # first, so it does not restart what we are stopping
+        kill_tree(supervisor)
+        forget_pid("supervisor")
     stopped_web = stop_service("web", WEB_PORT)
     stopped_api = stop_service("api", API_PORT)
     say(f"console: {'stopped' if stopped_web else 'not running'}")
@@ -370,7 +394,124 @@ def stop() -> None:
 def status() -> None:
     print(f"API      {API_HEALTH}: {'UP' if api_up() else 'down'}")
     print(f"console  {CONSOLE}: {'UP' if console_up() else 'down'}")
+    print(f"ready    {API_READY}: HTTP {http_status(API_READY)}")
+    print(f"memory   {free_memory_mb()} MB free")
     print(f"pids     {load_pids()}")
+
+
+# ---------------------------------------------------------------------------------------------
+# supervision
+
+
+def pid_alive(pid: int) -> bool:
+    if IS_WINDOWS:  # os.kill(pid, 0) would TERMINATE the process on Windows
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        return f'"{pid}"' in out
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def forget_pid(name: str) -> None:
+    data = load_pids()
+    if data.pop(name, None) is not None:
+        PIDS.write_text(json.dumps(data, indent=2))
+
+
+def free_memory_mb() -> int | None:
+    if IS_WINDOWS:
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [  # noqa: RUF012 - ctypes layout
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(_MemoryStatus)
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        if kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys // (1024 * 1024))
+        return None
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return None
+
+
+def start_supervisor(env: dict[str, str]) -> None:
+    current = load_pids().get("supervisor")
+    if current and pid_alive(current):
+        return
+    spawn("supervisor", [sys.executable, str(Path(__file__).resolve()), "--supervise"], ROOT, env)
+    say("supervisor started (restarts the API / console if they die)")
+
+
+class _Watch:
+    def __init__(self, name: str, pid_key: str, up, restart) -> None:  # type: ignore[no-untyped-def]
+        self.name, self.pid_key, self.up, self.restart = name, pid_key, up, restart
+        self.misses = 0
+        self.restarts: list[float] = []
+        self.gave_up = False
+
+
+def supervise() -> None:
+    """Runs until 'Stop Mission Control' kills it. A dead service is restarted with the same
+    steps as a launch; every death is logged with free memory (the OOM signature)."""
+    env = build_env()
+    watches = [
+        _Watch("API", "api", api_up, lambda: start_api(env)),
+        _Watch("console", "web", console_up, lambda: start_frontend(env)),
+    ]
+    while True:
+        time.sleep(SUPERVISE_INTERVAL_S)
+        for w in watches:
+            if w.gave_up:
+                continue
+            if w.up():
+                w.misses = 0
+                continue
+            w.misses += 1
+            if w.misses < DOWN_CHECKS:
+                continue
+            now = time.time()
+            w.restarts = [t for t in w.restarts if now - t < RESTART_WINDOW_S]
+            free = free_memory_mb()
+            pid = load_pids().get(w.pid_key)
+            how = "process exited" if pid and not pid_alive(pid) else "not answering"
+            if len(w.restarts) >= MAX_RESTARTS:
+                w.gave_up = True
+                say(
+                    f"SUPERVISOR: {w.name} died {MAX_RESTARTS} times in "
+                    f"{int(RESTART_WINDOW_S / 60)} min; giving up. Free memory {free} MB. "
+                    "See .logs/ and relaunch when fixed."
+                )
+                continue
+            say(f"SUPERVISOR: {w.name} down ({how}); free memory {free} MB; restarting")
+            w.restarts.append(now)
+            w.misses = 0
+            try:
+                w.restart()
+            except LaunchError as exc:
+                say(f"SUPERVISOR: {w.name} restart failed: {exc}")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -392,14 +533,18 @@ def install_shortcuts() -> None:
         create_shortcut(link, target, icon, "Start OPPORTUNITIES ON THE GO")
         say(f"shortcut: {link}")
     stop_link = ROOT / "Stop Mission Control.lnk"
-    create_shortcut(stop_link, ROOT / "Stop Mission Control.cmd", icon, "Stop OPPORTUNITIES ON THE GO")
+    create_shortcut(
+        stop_link, ROOT / "Stop Mission Control.cmd", icon, "Stop OPPORTUNITIES ON THE GO"
+    )
 
 
 def desktop_dir() -> Path:
     if IS_WINDOWS:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         ).stdout.strip()
         if out:
             return Path(out)
@@ -417,12 +562,17 @@ def create_shortcut(link: Path, target: Path, icon: Path, description: str) -> N
     )
     env = dict(os.environ)
     env.update(
-        LNK_PATH=str(link), LNK_TARGET=str(target), LNK_CWD=str(ROOT), LNK_ICON=str(icon),
+        LNK_PATH=str(link),
+        LNK_TARGET=str(target),
+        LNK_CWD=str(ROOT),
+        LNK_ICON=str(icon),
         LNK_DESC=description,
     )
     subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        env=env, check=True, capture_output=True,
+        env=env,
+        check=True,
+        capture_output=True,
     )
 
 
@@ -435,6 +585,7 @@ def main() -> int:
     group.add_argument("--stop", action="store_true")
     group.add_argument("--status", action="store_true")
     group.add_argument("--install", action="store_true")
+    group.add_argument("--supervise", action="store_true")
     args = parser.parse_args()
     sys.path.insert(0, str(Path(__file__).parent))
     try:
@@ -444,6 +595,8 @@ def main() -> int:
             status()
         elif args.install:
             install_shortcuts()
+        elif args.supervise:
+            supervise()
         else:
             start()
     except LaunchError as exc:

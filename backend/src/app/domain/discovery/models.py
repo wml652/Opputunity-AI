@@ -24,6 +24,7 @@ from app.domain.shared.errors import ValidationError
 
 MAX_KEYWORDS = 20
 MAX_TARGET_URLS = 20
+MAX_PAGE_TITLE = 300  # crawled_pages.title is VARCHAR(300)
 
 
 class CampaignPhase(enum.StrEnum):
@@ -68,6 +69,7 @@ COUNTER_KEYS = (
     "pages_fetched",
     "extract_queued",
     "extract_done",
+    "extract_failed",
     "stage_target",
     "stage_done",
     "stage_ready",
@@ -259,6 +261,11 @@ class CrawledPage:
     discovery_source: str | None = None  # seed | followed_link | web_search | linkedin | retry
     discovery_query: str | None = None
     strategy: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # <title> is untrusted page text (social sites emit whole posts): fit the column.
+        if self.title is not None and len(self.title) > MAX_PAGE_TITLE:
+            self.title = self.title[: MAX_PAGE_TITLE - 3].rstrip() + "..."
 
 
 @dataclass(frozen=True, slots=True)

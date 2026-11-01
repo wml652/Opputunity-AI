@@ -17,7 +17,9 @@ const PHASE_NAME: Record<string, string> = {
   CANCELLED: "Cancelled",
 };
 
-function Bar({ pct, tone }: { pct: number; tone: "run" | "ok" | "err" | "idle" }) {
+type Tone = "run" | "ok" | "warn" | "err" | "idle";
+
+function Bar({ pct, tone }: { pct: number; tone: Tone }) {
   const width = Math.max(0, Math.min(100, pct));
   return (
     <div
@@ -31,6 +33,7 @@ function Bar({ pct, tone }: { pct: number; tone: "run" | "ok" | "err" | "idle" }
         className={cn(
           "h-full transition-[width] duration-700 ease-out",
           tone === "ok" && "bg-ok",
+          tone === "warn" && "bg-warn",
           tone === "err" && "bg-err",
           tone === "run" && "bg-fg",
           tone === "idle" && "bg-faint",
@@ -74,10 +77,12 @@ export function ProgressBars({ campaign }: { campaign: CampaignT | null }) {
   const p: ProgressT | undefined =
     campaign.status === "RUNNING" ? (streamed ?? campaign.progress) : (campaign.progress ?? streamed);
   if (!p) return null;
-  const failed = campaign.status === "FAILED";
+  // A "completed" campaign whose extraction (nearly) all failed is shown as the failure it is.
+  const failed = campaign.status === "FAILED" || p.outcome === "failed";
+  const degraded = p.outcome === "degraded";
   const done = p.overall_pct >= 100;
   const running = campaign.status === "RUNNING";
-  const tone = failed ? "err" : done ? "ok" : running ? "run" : "idle";
+  const tone: Tone = failed ? "err" : degraded ? "warn" : done ? "ok" : running ? "run" : "idle";
   return (
     <div className="grid grid-cols-2 gap-px overflow-hidden rounded-sm border border-line bg-line">
       <div className="flex flex-col gap-1.5 bg-surface px-3 py-2">
@@ -90,9 +95,15 @@ export function ProgressBars({ campaign }: { campaign: CampaignT | null }) {
           </span>
           <Pct value={p.current.pct} />
         </div>
-        <Bar pct={p.current.pct} tone={failed ? "err" : p.current.pct >= 100 ? "ok" : running ? "run" : "idle"} />
-        <div className="truncate font-mono text-[10px] text-faint" title={p.current.detail ?? undefined}>
-          {p.current.detail ?? (running ? "working" : campaign.name)}
+        <Bar pct={p.current.pct} tone={tone === "idle" && p.current.pct >= 100 ? "ok" : tone} />
+        <div
+          className={cn(
+            "truncate font-mono text-[10px]",
+            failed ? "text-err" : degraded ? "text-warn" : "text-faint",
+          )}
+          title={p.outcome_detail ?? p.current.detail ?? undefined}
+        >
+          {p.outcome_detail ?? p.current.detail ?? (running ? "working" : campaign.name)}
         </div>
       </div>
       <div className="flex flex-col gap-1.5 bg-surface px-3 py-2">

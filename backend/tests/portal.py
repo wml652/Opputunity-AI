@@ -218,6 +218,16 @@ def render(path: str, query: str) -> tuple[int, dict[str, str], str]:
         return 200, {"content-type": "text/html"}, long_detail_page()
     if path == "/hub":
         return 200, {"content-type": "text/html"}, hub_page()
+    if path == "/long-title":  # social sites put whole posts in <title> (> VARCHAR(300))
+        page = _detail("omega-research-internship", "Omega Research Internship")
+        long_title = "Omega Research Internship - " * 20
+        return (
+            200,
+            {"content-type": "text/html"},
+            page.replace(
+                "<title>Omega Research Internship</title>", f"<title>{long_title}</title>", 1
+            ),
+        )
     if path.startswith("/deal/"):
         slug = path.removeprefix("/deal/")
         if slug not in HUB_DEALS:

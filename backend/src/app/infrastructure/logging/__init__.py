@@ -98,6 +98,19 @@ class RedactingFilter(logging.Filter):
         return True
 
 
+class BenignDisconnectFilter(logging.Filter):
+    """asyncio's Proactor loop logs "Exception in callback _ProactorBasePipeTransport..." with a
+    ConnectionResetError (WinError 10054) whenever a browser or client hangs up mid-request. It is
+    harmless; demote it to DEBUG so real asyncio errors stay visible."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        if not isinstance(exc, ConnectionResetError | ConnectionAbortedError):
+            return True
+        record.levelno, record.levelname = logging.DEBUG, "DEBUG"
+        return logging.getLogger().isEnabledFor(logging.DEBUG)
+
+
 THIRD_PARTY_LOGGERS = (
     "httpx",
     "httpcore",
@@ -147,6 +160,7 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
         root.addFilter(RedactingFilter())
         for name in THIRD_PARTY_LOGGERS:
             logging.getLogger(name).addFilter(RedactingFilter())
+        logging.getLogger("asyncio").addFilter(BenignDisconnectFilter())
         _configured = True
     root.setLevel(level.upper())
 

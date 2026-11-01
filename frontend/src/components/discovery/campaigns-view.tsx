@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -142,7 +143,16 @@ function CampaignDetail({ id }: { id: string | null }) {
           </div>
         ))}
       </div>
-      {c.error ? <p className="border-b border-line bg-err-soft px-3 py-1.5 text-xs text-err">{c.error}</p> : null}
+      {c.error ? (
+        <p className="border-b border-line bg-err-soft px-3 py-1.5 text-xs text-err">
+          {c.error}
+          {c.error.startsWith("Model provider rejected") ? (
+            <Link href="/settings/llm" className="ml-2 underline">
+              Fix in LLM Gateway
+            </Link>
+          ) : null}
+        </p>
+      ) : null}
       <div className="max-h-[440px] overflow-auto">
         <table className="w-full table-fixed border-collapse">
           <thead className="sticky top-0 bg-surface">

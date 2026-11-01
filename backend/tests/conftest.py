@@ -38,6 +38,7 @@ logging.raiseExceptions = False
 _TEST_SCRATCH = tempfile.mkdtemp(prefix="ootg-test-")
 os.environ["LOGS_DIR"] = os.path.join(_TEST_SCRATCH, "logs")
 os.environ["STORAGE_DIR"] = os.path.join(_TEST_SCRATCH, "storage")
+os.environ["MIN_FREE_MEMORY_MB"] = "0"  # fills never wait on the host's free memory in tests
 
 from app.bootstrap.app import create_app_with  # noqa: E402
 from app.bootstrap.container import Infrastructure, build_infrastructure  # noqa: E402
@@ -162,6 +163,7 @@ def settings(tmp_path: Path, portal: Portal, fake_portal: FakePortalServer) -> S
         aggregator_domains=["127.0.0.2"],  # the fake portal's aggregator mirror
         crawl_use_playwright=False,
         crawl_politeness_seconds=0.0,
+        min_free_memory_mb=0,
         _env_file=None,  # type: ignore[call-arg]  # tests never read the developer's .env
         environment="test",
         database_url="postgresql+asyncpg://unused/unused",

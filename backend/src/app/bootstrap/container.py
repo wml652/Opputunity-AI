@@ -140,7 +140,7 @@ from app.application.profile.use_cases import (
     UploadDocument,
 )
 from app.application.services.evidence import EvidenceDeps, ProfileEvidenceRetriever
-from app.application.system.use_cases import GetWorkerStatus
+from app.application.system.use_cases import CheckReadiness, GetWorkerStatus
 from app.application.training.service import (
     BackfillTrajectories,
     ExportTrainingData,
@@ -190,6 +190,7 @@ from app.infrastructure.notify.notifiers import (
 )
 from app.infrastructure.runners.application_runner import InProcessApplicationRunner
 from app.infrastructure.runners.campaign_runners import InProcessCampaignRunner
+from app.infrastructure.runtime.resources import DatabaseProbe, PsutilResources, RedisProbe
 from app.infrastructure.scraping.distiller import HtmlContentProcessor
 from app.infrastructure.scraping.document_parser import PdfLayoutParser
 from app.infrastructure.scraping.fetchers import playwright_available
@@ -729,6 +730,8 @@ def build_application_runner(infra: Infrastructure) -> IApplicationRunner:
             RunApplication(deps),
             RunSubmission(deps),
             max_parallel=infra.settings.max_parallel_fills,
+            resources=PsutilResources(),
+            min_free_memory_mb=infra.settings.min_free_memory_mb,
         )
     return infra.application_runner
 
@@ -837,6 +840,9 @@ def build_api_container(infra: Infrastructure) -> ApiContainer:
         connection_status=GetConnectionStatus(infra.uow_factory),
         replay_events=ReplayEvents(infra.uow_factory),
         worker_status=GetWorkerStatus(infra.worker_registry),
+        readiness=CheckReadiness(
+            [DatabaseProbe(infra.engine), RedisProbe(infra.redis)], PsutilResources()
+        ),
         vault=build_vault(infra),
         discovery=build_discovery(infra),
         applications=build_applications(infra),

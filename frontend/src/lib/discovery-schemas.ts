@@ -24,6 +24,9 @@ export const progressSchema = z.object({
   staged: z.number(),
   stage_target: z.number(),
   auto_stage: z.boolean(),
+  // How well a finished campaign worked (null while it runs).
+  outcome: z.enum(["ok", "degraded", "failed"]).nullable().optional(),
+  outcome_detail: z.string().nullable().optional(),
 });
 export type ProgressT = z.infer<typeof progressSchema>;
 
