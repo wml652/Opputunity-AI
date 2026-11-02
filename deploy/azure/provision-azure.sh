@@ -130,18 +130,32 @@ APP_ID="$(azq ad app list --display-name "$DEPLOYER" --query '[0].appId' -o tsv)
 [ -n "$APP_ID" ] || APP_ID="$(azq ad app create --display-name "$DEPLOYER" --query appId -o tsv)"
 exists ad sp show --id "$APP_ID" || az ad sp create --id "$APP_ID" --only-show-errors --output none
 SP_OBJECT_ID="$(azq ad sp show --id "$APP_ID" --query id -o tsv)"
-if [ "$(azq ad app federated-credential list --id "$APP_ID" --query "length([?name=='github-main'])" -o tsv)" = "0" ]; then
-  cat >"$TMP/federated.json" <<JSON
+# GitHub's token subject is either the classic "repo:owner/name:..." or, for repositories using
+# immutable subjects (the default for new ones), "repo:owner@<id>/name@<id>:...". Ask GitHub
+# which prefix this repository presents, and trust the main branch under both forms.
+SUBJECT_PREFIXES="repo:${GITHUB_REPO}"
+if command -v gh >/dev/null 2>&1; then
+  immutable="$(gh api "repos/${GITHUB_REPO}/actions/oidc/customization/sub" --jq '.sub_claim_prefix // empty' 2>/dev/null | tr -d '\r' || true)"
+  [ -n "$immutable" ] && [ "$immutable" != "repo:${GITHUB_REPO}" ] && SUBJECT_PREFIXES="$SUBJECT_PREFIXES $immutable"
+fi
+n=0
+for prefix in $SUBJECT_PREFIXES; do
+  n=$((n + 1))
+  cred="github-main"; [ "$n" -gt 1 ] && cred="github-main-$n"
+  if [ "$(azq ad app federated-credential list --id "$APP_ID" --query "length([?name=='$cred'])" -o tsv)" = "0" ]; then
+    cat >"$TMP/federated.json" <<JSON
 {
-  "name": "github-main",
+  "name": "$cred",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:${GITHUB_REPO}:ref:refs/heads/main",
+  "subject": "${prefix}:ref:refs/heads/main",
   "audiences": ["api://AzureADTokenExchange"]
 }
 JSON
-  az ad app federated-credential create --id "$APP_ID" \
-    --parameters "@$(native "$TMP/federated.json")" --only-show-errors --output none
-fi
+    az ad app federated-credential create --id "$APP_ID" \
+      --parameters "@$(native "$TMP/federated.json")" --only-show-errors --output none
+  fi
+  echo "   trusts ${prefix}:ref:refs/heads/main"
+done
 ensure_role "$SP_OBJECT_ID" Contributor "$RG_ID" # update the container apps
 ensure_role "$SP_OBJECT_ID" AcrPush "$ACR_ID"    # push images
 
