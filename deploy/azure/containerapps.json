@@ -1,0 +1,406 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "OPPORTUNITIES ON THE GO container apps: redis, api, workers (system / discovery / browser), frontend, in the environment deployed by environment.json. Native JSON types (no YAML conversion); deployed by provision-azure.sh."
+  },
+  "parameters": {
+    "location": {
+      "type": "string"
+    },
+    "prefix": {
+      "type": "string"
+    },
+    "identityId": {
+      "type": "string"
+    },
+    "acrServer": {
+      "type": "string"
+    },
+    "storageName": {
+      "type": "string"
+    },
+    "deployApps": {
+      "type": "bool",
+      "metadata": {
+        "description": "false until GitHub Actions has pushed the images (only redis is deployed)"
+      }
+    },
+    "apiImage": {
+      "type": "string",
+      "defaultValue": ""
+    },
+    "workerImage": {
+      "type": "string",
+      "defaultValue": ""
+    },
+    "frontendImage": {
+      "type": "string",
+      "defaultValue": ""
+    },
+    "consoleUrl": {
+      "type": "string"
+    },
+    "maxBrowsers": {
+      "type": "string",
+      "defaultValue": "2"
+    },
+    "maxHitlBrowsers": {
+      "type": "string",
+      "defaultValue": "1"
+    },
+    "sizes": {
+      "type": "object",
+      "metadata": {
+        "description": "{ app: { cpu: '0.5', memory: '1Gi' } } for redis, api, frontend, system, discovery, browser"
+      }
+    },
+    "databaseUrl": {
+      "type": "securestring"
+    },
+    "databaseMigrationUrl": {
+      "type": "securestring"
+    },
+    "redisUrl": {
+      "type": "securestring"
+    },
+    "redisPassword": {
+      "type": "securestring"
+    },
+    "encryptionKeys": {
+      "type": "securestring"
+    },
+    "jwtSecret": {
+      "type": "securestring"
+    }
+  },
+  "variables": {
+    "identity": {
+      "type": "UserAssigned",
+      "userAssignedIdentities": {
+        "[parameters('identityId')]": {}
+      }
+    },
+    "registries": [
+      {
+        "server": "[parameters('acrServer')]",
+        "identity": "[parameters('identityId')]"
+      }
+    ],
+    "backendSecrets": [
+      {
+        "name": "database-url",
+        "value": "[parameters('databaseUrl')]"
+      },
+      {
+        "name": "database-migration-url",
+        "value": "[parameters('databaseMigrationUrl')]"
+      },
+      {
+        "name": "redis-url",
+        "value": "[parameters('redisUrl')]"
+      },
+      {
+        "name": "encryption-keys",
+        "value": "[parameters('encryptionKeys')]"
+      },
+      {
+        "name": "jwt-secret",
+        "value": "[parameters('jwtSecret')]"
+      }
+    ],
+    "backendEnv": [
+      {
+        "name": "EXECUTION_MODE",
+        "value": "arq"
+      },
+      {
+        "name": "HITL_MODE",
+        "value": "remote"
+      },
+      {
+        "name": "DATABASE_URL",
+        "secretRef": "database-url"
+      },
+      {
+        "name": "DATABASE_MIGRATION_URL",
+        "secretRef": "database-migration-url"
+      },
+      {
+        "name": "REDIS_URL",
+        "secretRef": "redis-url"
+      },
+      {
+        "name": "ENCRYPTION_KEYS",
+        "secretRef": "encryption-keys"
+      },
+      {
+        "name": "JWT_SECRET",
+        "secretRef": "jwt-secret"
+      },
+      {
+        "name": "COOKIE_SECURE",
+        "value": "true"
+      },
+      {
+        "name": "CONSOLE_URL",
+        "value": "[parameters('consoleUrl')]"
+      },
+      {
+        "name": "CORS_ORIGINS",
+        "value": "[string(createArray(parameters('consoleUrl')))]"
+      },
+      {
+        "name": "OUTBOX_RELAY_IN_API",
+        "value": "false"
+      },
+      {
+        "name": "MAX_BROWSERS",
+        "value": "[parameters('maxBrowsers')]"
+      },
+      {
+        "name": "MAX_HITL_BROWSERS",
+        "value": "[parameters('maxHitlBrowsers')]"
+      },
+      {
+        "name": "MIN_FREE_MEMORY_MB",
+        "value": "0"
+      }
+    ],
+    "dataVolume": [
+      {
+        "name": "data",
+        "storageType": "AzureFile",
+        "storageName": "[parameters('storageName')]",
+        "mountOptions": "uid=10001,gid=10001,dir_mode=0770,file_mode=0660,nobrl"
+      }
+    ],
+    "dataMount": [
+      {
+        "volumeName": "data",
+        "mountPath": "/data"
+      }
+    ],
+    "workers": [
+      "system",
+      "discovery",
+      "browser"
+    ],
+    "environmentId": "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('prefix')))]",
+    "storageId": "[resourceId('Microsoft.App/managedEnvironments/storages', format('{0}-env', parameters('prefix')), parameters('storageName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-redis', parameters('prefix'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "environmentId": "[variables('environmentId')]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": false,
+            "transport": "tcp",
+            "targetPort": 6379,
+            "exposedPort": 6379
+          },
+          "secrets": [
+            {
+              "name": "redis-pass",
+              "value": "[parameters('redisPassword')]"
+            }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "redis",
+              "image": "docker.io/library/redis:7-alpine",
+              "command": [
+                "sh",
+                "-c"
+              ],
+              "args": [
+                "exec redis-server --requirepass \"$REDIS_PASSWORD\" --maxmemory 192mb --maxmemory-policy noeviction"
+              ],
+              "env": [
+                {
+                  "name": "REDIS_PASSWORD",
+                  "secretRef": "redis-pass"
+                }
+              ],
+              "resources": {
+                "cpu": "[json(parameters('sizes').redis.cpu)]",
+                "memory": "[parameters('sizes').redis.memory]"
+              }
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          }
+        }
+      },
+      "dependsOn": []
+    },
+    {
+      "condition": "[parameters('deployApps')]",
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-api', parameters('prefix'))]",
+      "location": "[parameters('location')]",
+      "identity": "[variables('identity')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', format('{0}-redis', parameters('prefix')))]"
+      ],
+      "properties": {
+        "environmentId": "[variables('environmentId')]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": false,
+            "transport": "auto",
+            "targetPort": 8000,
+            "allowInsecure": true
+          },
+          "registries": "[variables('registries')]",
+          "secrets": "[variables('backendSecrets')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "api",
+              "image": "[parameters('apiImage')]",
+              "env": "[concat(variables('backendEnv'), createArray(createObject('name', 'RUN_MIGRATIONS', 'value', 'true')))]",
+              "resources": {
+                "cpu": "[json(parameters('sizes').api.cpu)]",
+                "memory": "[parameters('sizes').api.memory]"
+              },
+              "volumeMounts": "[variables('dataMount')]",
+              "probes": [
+                {
+                  "type": "Startup",
+                  "httpGet": {
+                    "path": "/api/v1/health",
+                    "port": 8000
+                  },
+                  "periodSeconds": 10,
+                  "failureThreshold": 30
+                },
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/api/v1/health",
+                    "port": 8000
+                  },
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/api/v1/ready",
+                    "port": 8000
+                  },
+                  "periodSeconds": 15
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          },
+          "volumes": "[variables('dataVolume')]"
+        }
+      }
+    },
+    {
+      "condition": "[parameters('deployApps')]",
+      "copy": {
+        "name": "workers",
+        "count": "[length(variables('workers'))]"
+      },
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-worker-{1}', parameters('prefix'), variables('workers')[copyIndex()])]",
+      "location": "[parameters('location')]",
+      "identity": "[variables('identity')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', format('{0}-api', parameters('prefix')))]"
+      ],
+      "properties": {
+        "environmentId": "[variables('environmentId')]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "registries": "[variables('registries')]",
+          "secrets": "[variables('backendSecrets')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "worker",
+              "image": "[parameters('workerImage')]",
+              "env": "[concat(variables('backendEnv'), createArray(createObject('name', 'WORKER_QUEUE', 'value', variables('workers')[copyIndex()])))]",
+              "resources": {
+                "cpu": "[json(parameters('sizes')[variables('workers')[copyIndex()]].cpu)]",
+                "memory": "[parameters('sizes')[variables('workers')[copyIndex()]].memory]"
+              },
+              "volumeMounts": "[variables('dataMount')]"
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          },
+          "volumes": "[variables('dataVolume')]"
+        }
+      }
+    },
+    {
+      "condition": "[parameters('deployApps')]",
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-frontend', parameters('prefix'))]",
+      "location": "[parameters('location')]",
+      "identity": "[variables('identity')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', format('{0}-api', parameters('prefix')))]"
+      ],
+      "properties": {
+        "environmentId": "[variables('environmentId')]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": true,
+            "transport": "auto",
+            "targetPort": 3000,
+            "allowInsecure": false
+          },
+          "registries": "[variables('registries')]"
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "frontend",
+              "image": "[parameters('frontendImage')]",
+              "resources": {
+                "cpu": "[json(parameters('sizes').frontend.cpu)]",
+                "memory": "[parameters('sizes').frontend.memory]"
+              }
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {}
+}

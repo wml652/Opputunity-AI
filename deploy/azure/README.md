@@ -20,8 +20,19 @@ QLoRA training stays on Google Colab: download the dataset and notebook from
 
 ## The 5 steps
 
-Open **[Azure Cloud Shell](https://shell.azure.com)** (Bash). It already has `az`, `git`, `gh`
-and `python3`, and it is already signed in to Azure (otherwise run `az login`).
+Run it in **[Azure Cloud Shell](https://shell.azure.com)** (Bash) or in **Git Bash on Windows**
+with the Azure CLI and GitHub CLI installed (`az login`, `gh auth login`). Nothing is built
+locally either way.
+
+The script runs in this order, so CI is never left without credentials:
+1. resource group, registry and pull identity;
+2. GitHub OIDC deployer and the repository secrets and variables (checked with `gh` right away);
+3. Log Analytics, VNet, Azure Files share and the Container Apps environment;
+4. PostgreSQL;
+5. the apps.
+
+Both the environment and the apps are deployed from ARM templates (`environment.json`,
+`containerapps.json`) - native JSON types, no CLI YAML conversion.
 
 **1. Get the code**
 
@@ -33,12 +44,12 @@ git clone https://github.com/wml652/Opputunity-AI.git && cd Opputunity-AI
 `JWT_SECRET` must never change, or stored data and sign-ins become unreadable)
 
 ```bash
-export POSTGRES_ADMIN_PASS="$(openssl rand -base64 24)"
-export APP_DB_PASS="$(openssl rand -base64 24)"
+export POSTGRES_ADMIN_PASS="$(openssl rand -hex 20)"   # letters/digits only: they pass through az's command line
+export APP_DB_PASS="$(openssl rand -hex 20)"
 export REDIS_PASS="$(openssl rand -hex 24)"
 export ENCRYPTION_KEYS="1:$(openssl rand -base64 32)"
 export JWT_SECRET="$(openssl rand -hex 32)"
-export LOCATION=eastus          # optional; any region with Container Apps + Flexible Server
+export LOCATION=eastasia        # Azure for Students allows: centralindia polandcentral eastasia uaenorth austriaeast
 echo "$POSTGRES_ADMIN_PASS $APP_DB_PASS $REDIS_PASS $ENCRYPTION_KEYS $JWT_SECRET"  # save these
 ```
 
@@ -87,13 +98,23 @@ GitHub configuration it sets (or prints, if `gh` is not signed in):
 
 ## Costs and sizing
 
-Everything runs 24/7 with one replica each (4.75 vCPU / 9.5 GiB in total by default), so the
-bill is dominated by Container Apps compute. Roughly: PostgreSQL B1ms about 15 USD/month,
-Registry Basic about 5 USD/month, Azure Files a few cents, Container Apps the rest - check the
-[pricing calculator](https://azure.microsoft.com/pricing/calculator/) for your region (student
-credits cover a lot of it). To shrink it, export smaller sizes before running the script, for
-example `export BROWSER_CPU=1.0 BROWSER_MEM=2Gi MAX_BROWSERS=2 API_CPU=1.0 API_MEM=2Gi
-MAX_HITL_BROWSERS=1` (Consumption needs memory = 2 x CPU, in 0.25 vCPU steps).
+Defaults (one replica each, always on): redis 0.25 vCPU / 0.5 GiB; api, frontend, system and
+discovery workers 0.5 / 1 GiB each; browser worker 1.0 / 2 GiB - 3.25 vCPU / 6.5 GiB in total,
+with `MAX_BROWSERS=2` and `MAX_HITL_BROWSERS=1`. PostgreSQL B1ms (B2s only if B1ms has no
+capacity), Registry Basic, Log Analytics capped at 0.2 GB/day.
+
+Container Apps bills per second of allocated vCPU / GiB. A replica that is busy all month at
+these sizes costs far more than a 100 USD student credit lasts; idle replicas are billed at a much
+lower rate, but workers that poll Redis may not count as idle. Watch **Cost Management** in the
+portal during the first days, and pause everything when you are not using it:
+
+```bash
+bash deploy/azure/pause.sh      # all apps to 0 replicas + stop PostgreSQL (data is kept)
+bash deploy/azure/resume.sh     # start PostgreSQL + 1 replica each
+```
+
+Override sizes before running the script (memory = 2 x CPU, 0.25 vCPU steps), e.g.
+`export SYSTEM_CPU=0.25 SYSTEM_MEM=0.5Gi FRONTEND_CPU=0.25 FRONTEND_MEM=0.5Gi`.
 
 ## Notes
 

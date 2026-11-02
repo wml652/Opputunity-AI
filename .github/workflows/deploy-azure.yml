@@ -24,6 +24,32 @@ env:
   APP_PREFIX: ${{ vars.APP_PREFIX || 'ootg' }}
 
 jobs:
+  config:
+    name: Azure configuration present
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check secrets and variables (set by deploy/azure/provision-azure.sh)
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          BACKEND_INTERNAL_URL: ${{ vars.BACKEND_INTERNAL_URL }}
+        run: |
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID \
+            AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER BACKEND_INTERNAL_URL; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing GitHub secrets/variables:$missing - run deploy/azure/provision-azure.sh first"
+            exit 1
+          fi
+          echo "all Azure secrets and variables are set"
+
   checks:
     name: Lint, types, unit tests
     runs-on: ubuntu-latest
@@ -62,7 +88,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.image }}
-    needs: checks
+    needs: [config, checks]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

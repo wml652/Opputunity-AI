@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Container Apps environment (custom VNet, Consumption workload profile, Log Analytics) and its Azure Files storage link. Keys are read with listKeys() inside the deployment, never passed on a command line."
+  },
+  "parameters": {
+    "location": {
+      "type": "string"
+    },
+    "prefix": {
+      "type": "string"
+    },
+    "subnetId": {
+      "type": "string"
+    },
+    "workspaceName": {
+      "type": "string"
+    },
+    "storageAccountName": {
+      "type": "string"
+    },
+    "storageName": {
+      "type": "string"
+    }
+  },
+  "variables": {
+    "envName": "[format('{0}-env', parameters('prefix'))]",
+    "environmentId": "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env', parameters('prefix')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('envName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), '2022-10-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), '2022-10-01').primarySharedKey]"
+          }
+        },
+        "vnetConfiguration": {
+          "infrastructureSubnetId": "[parameters('subnetId')]",
+          "internal": false
+        },
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption"
+          }
+        ],
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/{1}', variables('envName'), parameters('storageName'))]",
+      "dependsOn": [
+        "[variables('environmentId')]"
+      ],
+      "properties": {
+        "azureFile": {
+          "accountName": "[parameters('storageAccountName')]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value]",
+          "shareName": "[parameters('storageName')]",
+          "accessMode": "ReadWrite"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "defaultDomain": {
+      "type": "string",
+      "value": "[reference(variables('environmentId'), '2024-03-01').defaultDomain]"
+    }
+  }
+}
