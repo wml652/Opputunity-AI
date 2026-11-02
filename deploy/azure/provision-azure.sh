@@ -20,6 +20,9 @@
 #   CUSTOM_CONSOLE_URL  SKIP_GITHUB=1 (print instead of setting GitHub secrets)
 #   <APP>_CPU / <APP>_MEM for REDIS API FRONTEND SYSTEM DISCOVERY BROWSER (see SIZES below)
 set -euo pipefail
+# Git Bash (MSYS) rewrites arguments that look like POSIX paths - including Azure resource ids
+# such as /subscriptions/... - into Windows paths before az.cmd sees them. Turn that off.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCE_GROUP="${RESOURCE_GROUP:-ootg-rg}"
@@ -85,10 +88,11 @@ ensure_role() { # principal-object-id role scope; retried (new principals replic
     count="$(azq role assignment list --assignee "$1" --role "$2" --scope "$3" --query 'length(@)' -o tsv 2>/dev/null || echo 0)"
     [ "$count" != "0" ] && return 0
     az role assignment create --assignee-object-id "$1" --assignee-principal-type ServicePrincipal \
-      --role "$2" --scope "$3" --only-show-errors --output none 2>/dev/null && return 0
-    echo "   (waiting for the principal to replicate, retry $attempt/8)"
+      --role "$2" --scope "$3" --only-show-errors --output none 2>"$TMP/role.err" && return 0
+    echo "   (role assignment not possible yet, retry $attempt/8: $(head -c 160 "$TMP/role.err" | tr -d '\r\n'))"
     sleep 15
   done
+  cat "$TMP/role.err" >&2
   die "could not assign $2 on $3"
 }
 
